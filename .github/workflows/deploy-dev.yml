@@ -1,0 +1,45 @@
+name: deploy-dev
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write      # GitHub OIDC -> AWS, no long-lived keys
+  contents: read
+env:
+  AWS_REGION: eu-west-2
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with: {role-to-arn: "${{ vars.TAAD_DEV_PLAN_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}"}
+      - uses: hashicorp/setup-terraform@v3
+      - run: |
+          cd infra/terraform/environments/dev
+          terraform init -backend-config=backend.hcl
+          terraform plan -var-file=dev.tfvars -out=tfplan
+      - uses: actions/upload-artifact@v4
+        with: {name: tfplan-dev, path: infra/terraform/environments/dev/tfplan}
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: dev          # configure required reviewers on this GitHub Environment: plan is reviewed before apply
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with: {role-to-arn: "${{ vars.TAAD_DEV_APPLY_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}"}
+      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/download-artifact@v4
+        with: {name: tfplan-dev, path: infra/terraform/environments/dev}
+      - run: |
+          cd infra/terraform/environments/dev
+          terraform init -backend-config=backend.hcl
+          terraform apply tfplan
+  smoke:
+    needs: apply
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          curl -fsS "${{ vars.TAAD_DEV_URL }}/health" | tee health.json
+          python3 -c "import json;d=json.load(open('health.json'));assert d['status']=='ok' and d['question_count']==318"

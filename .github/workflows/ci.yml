@@ -1,0 +1,38 @@
+name: ci
+on:
+  push: {branches: [main]}
+  pull_request:
+permissions: {contents: read}
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+      - run: make build
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt && .venv/bin/playwright install --with-deps chromium
+      - run: make browser
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with: {terraform_version: "1.9.8"}
+      - run: terraform fmt -check -recursive infra/terraform
+      - run: |
+          for e in dev staging prod; do
+            (cd infra/terraform/environments/$e && terraform init -backend=false -input=false && terraform validate)
+          done
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t taad:ci .

@@ -1,0 +1,5 @@
+bucket         = "REPLACE-tfstate-bucket"
+key            = "taad/dev/terraform.tfstate"
+region         = "eu-west-2"
+dynamodb_table = "REPLACE-tf-locks"
+encrypt        = true
