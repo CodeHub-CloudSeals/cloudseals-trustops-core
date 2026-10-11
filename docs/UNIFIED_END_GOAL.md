@@ -23,5 +23,11 @@ Merge what is worth keeping from **TrustOps Diagnostic Studio** (`cs-trustops-st
 8. **UI**: Google login, Use cases page, Frameworks page, Agent Flow with all agents (live animation), consistent polish.
 9. **Verified**: tests green, container layout test, deployed `/health`, portal served from Cloud Run, Gemini call proven from the deployed service.
 
+## Also ported (phase 2)
+- **Maturity scorer** (5 TrustOps principles): scores bounded 1-5, the overall score is computed here, a score of 3+ without cited evidence is capped at 2.
+- **Roadmap agent**: critical gaps are forced into the first 90 days, dependencies are checked for cycles, totals are computed here, uncovered critical/high gaps are reported.
+- **Diagnostic report**: deterministic HTML (every string escaped) from reviewer-validated material only, `DRAFT` until use cases, maturity and roadmap are validated; optional AI-drafted narrative.
+- **Studio page** (`#/use-cases`): 5-step pipeline with reviewer gates; **TrustOps hub** strip lists workflow packs and tools.
+
 ## Deliberately not in this pass
-Studio's maturity scorer, roadmap agent, architecture-overlay agent and HTML report generator (TAAD already has its own report pipeline), Firestore, the Next.js UI. The old nine services keep running untouched until you decide to retire them.
+Architecture-overlay agent, Firestore, the Next.js UI. The old nine services keep running untouched until you decide to retire them.

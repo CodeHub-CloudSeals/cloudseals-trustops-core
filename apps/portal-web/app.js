@@ -169,15 +169,16 @@ async function render() {
     el("div", { class: "module-menu-popover" }, items.map(link)));
   const adminItems = [
     ...(canUseAdminMetrics ? [["admin", "Portfolio"]] : []),
-    ...(hasAnyRole("cloudseals_admin") ? [["registrations", "Registrations"]] : []),
-    ...(hasAnyRole("cloudseals_admin", "cloudseals_platform_ops", "auditor_readonly") ? [["activity", "Activity"]] : []),
+    ["workspaces", "Customer workspaces"],
+    ...(hasAnyRole("cloudseals_admin") ? [["users", "Users"], ["registrations", "Registrations"]] : []),
+    ...(hasAnyRole("cloudseals_admin", "cloudseals_platform_ops", "auditor_readonly") ? [["activity", "Audit logs"], ["service-health", "Service health"]] : []),
     ["integrations", "Integrations"], ["datasets", "Datasets"], ["workflows", "Workflows"],
     ["agents", "Agents"], ["models", "Models"], ["policies", "Policies"], ["authority", "Authority"],
     ["approval-matrix", "Approval matrix"], ["agentops", "AgentOps"],
     ...(hasAnyRole("cloudseals_admin") ? [["tenant-settings", "Tenant settings"]] : []),
   ];
   nav.replaceChildren(
-    link(["dashboard", "Command Center"]), link(["assessments", "Diagnosis"]), link(["use-cases", "Use cases"]), link(["trustops", "TrustOps"]), link(["agent-flow", "Agent Flow"]),
+    link(["dashboard", "Command Center"]), link(["assessments", "Diagnosis"]), ...(canUseAdminMetrics ? [link(["cases", "Cases"])] : []), link(["use-cases", "Use cases"]), link(["trustops", "TrustOps"]), link(["agent-flow", "Agent Flow"]),
     canUseAdminMetrics ? link(["queue", "Review queue"]) : "",
     group("Operations", [["reconciliation", "Reconciliation"], ["exceptions", "Exceptions"], ["approvals", "Approvals"],
       ["frameworks", "Frameworks"], ["evidence", "Evidence"], ["readiness", "Readiness"], ["shadow-roi", "Shadow ROI"], ...(staff ? [] : [["team", "Team"]])]),
@@ -641,7 +642,15 @@ routes.trustops = async (selectedRunId) => {
     el("h3", {}, agent.id.split(".").at(-1).replaceAll("_", " ")),
     el("p", { class: "agent-purpose" }, agent.purpose),
     el("div", { class: "permission-list" }, agent.authority.map((permission) => el("span", { class: "permission-chip" }, permission)))));
-  const page = el("div", { class: "trustops-page" },
+  const packCard = (title, text, status, href, active = false) => el(href ? "a" : "article", { class: `pack-card${active ? " is-active" : ""}${href || active ? "" : " is-planned"}`, ...(href ? { href } : {}) },
+    el("span", { class: "pack-status" }, status), el("strong", {}, title), el("p", {}, text));
+  const packs = el("section", { class: "pack-strip", "aria-label": "TrustOps workflow packs and tools" },
+    packCard("LedgerSight AR / Cash", "Governed cash application with policy gates and maker-checker approval.", "WORKFLOW PACK · AVAILABLE", null, true),
+    packCard("AI governance diagnostic", "Documents to AI use cases, framework gaps, maturity, roadmap and report.", "PIPELINE · AVAILABLE", "#/use-cases"),
+    packCard("Framework library", "EU AI Act, ISO 42001, NIST AI RMF, SR 11-7 and FDA SaMD requirements.", "REFERENCE · AVAILABLE", "#/frameworks"),
+    packCard("Agent Flow", "Watch all agents work through a flow, step by step.", "LIVE VIEW", "#/agent-flow"),
+    packCard("More workflow packs", "Additional governed workflows are added as packs; none are configured yet.", "PLANNED", null));
+  const page = el("div", { class: "trustops-page" }, packs,
     el("section", { class: "trustops-hero" }, el("div", {}, el("span", { class: "eyebrow" }, "CLOUDSEALS · TRUSTOPS CORE"),
       el("h2", {}, "LedgerSight AR / Cash"), el("p", {}, "Governed cash application with a traceable decision at every step.")),
       el("div", { class: "hero-badges" }, el("span", { class: "environment-pill" }, isSandbox ? "SANDBOX ENVIRONMENT" : "RUNTIME UNAVAILABLE"),
@@ -1054,14 +1063,60 @@ routes.registrations = async () => {
     el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "ACCESS REQUESTS"), el("h3", {}, `${items.length} total`))), content)));
 };
 routes.activity = async () => {
-  const { items } = await api("/v1/admin/activity");
-  const rows = items.map((a) => el("tr", {}, el("td", {}, new Date(a.at * 1000).toLocaleString()), el("td", {}, a.sub), el("td", {}, a.action), el("td", {}, a.ref)));
-  const content = items.length
-    ? el("div", { class: "table-wrap" }, el("table", { class: "module-table" },
-      el("thead", {}, el("tr", {}, ["When", "Who", "Action", "Reference"].map((h) => el("th", { scope: "col" }, h)))), el("tbody", {}, rows)))
-    : el("p", { class: "empty-state" }, "No activity has been recorded.");
-  main.replaceChildren(moduleFrame("CLOUDSEALS · AUDIT", "Activity", "Administrative and assessment events recorded by this environment.",
-    el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "RECENT EVENTS"), el("h3", {}, `${items.length} events`))), content)));
+  const q = { text: "", action: "", actor: "", from: "", to: "", offset: 0, limit: 50 };
+  const out = el("div", {}), cats = el("div", { class: "case-filters", role: "group", "aria-label": "Filter by category" });
+  const params = (extra = {}) => {
+    const u = new URLSearchParams();
+    if (q.text) u.set("q", q.text); if (q.action) u.set("action", q.action); if (q.actor) u.set("actor", q.actor);
+    if (q.from) u.set("since", String(new Date(`${q.from}T00:00:00`).getTime() / 1000)); if (q.to) u.set("until", String(new Date(`${q.to}T23:59:59`).getTime() / 1000));
+    for (const [k, v] of Object.entries(extra)) u.set(k, String(v)); return u.toString();
+  };
+  const load = safe(async () => {
+    const r = await api(`/v1/admin/activity?${params({ limit: q.limit, offset: q.offset })}`);
+    cats.replaceChildren(el("button", { class: `chip${q.action ? "" : " on"}`, onclick: () => { q.action = ""; q.offset = 0; load(); } }, "All", el("em", {}, String(Object.values(r.categories).reduce((a, b) => a + b, 0)))),
+      ...Object.entries(r.categories).map(([c, n]) => el("button", { class: `chip${q.action === `${c}.` ? " on" : ""}`, onclick: () => { q.action = `${c}.`; q.offset = 0; load(); } }, c, el("em", {}, String(n)))));
+    const from = r.total ? r.offset + 1 : 0, to = Math.min(r.offset + r.limit, r.total);
+    out.replaceChildren(r.items.length ? el("div", { class: "table-wrap" }, el("table", { class: "module-table" },
+      el("thead", {}, el("tr", {}, ["When", "Who", "Action", "Reference"].map((h) => el("th", { scope: "col" }, h)))),
+      el("tbody", {}, r.items.map((a) => el("tr", {}, el("td", {}, new Date(a.at * 1000).toLocaleString()), el("td", {}, a.email || a.sub, a.email ? el("br") : "", a.email ? el("small", { class: "help" }, a.sub) : ""),
+        el("td", {}, el("span", { class: "audit-action" }, a.action)), el("td", {}, String(a.ref).slice(0, 80))))))) : el("p", { class: "empty-state" }, "No events match these filters."),
+      el("div", { class: "row audit-pager" }, el("span", { class: "help" }, `Showing ${from} to ${to} of ${r.total}`),
+        el("button", { class: "secondary", disabled: q.offset === 0, onclick: () => { q.offset = Math.max(0, q.offset - q.limit); load(); } }, "← Newer"),
+        el("button", { class: "secondary", disabled: to >= r.total, onclick: () => { q.offset += q.limit; load(); } }, "Older →")));
+  });
+  const field = (name, type, ph, key) => el("input", { type, placeholder: ph, "aria-label": ph, value: q[key], onchange: (e) => { q[key] = e.target.value.trim(); q.offset = 0; load(); } });
+  main.replaceChildren(moduleFrame("CLOUDSEALS · AUDIT", "Audit logs", "Every administrative, review and agent event this environment has recorded. Filter, page through it, or export it.",
+    el("section", { class: "module-panel" }, el("div", { class: "row case-tools" }, field("q", "search", "Search action, reference or person", "text"), field("actor", "text", "Person", "actor"),
+      el("label", { class: "uc-picker" }, "From", field("from", "date", "From date", "from")), el("label", { class: "uc-picker" }, "To", field("to", "date", "To date", "to")),
+      el("button", { class: "secondary", onclick: safe(async (e) => { e.currentTarget.disabled = true; await dl(`/v1/admin/activity/export?${params()}`, "activity-log.csv"); e.currentTarget.disabled = false; }) }, "Export CSV")),
+      cats, out)));
+  load();
+};
+
+routes["service-health"] = async () => {
+  const draw = async (probe) => {
+    const h = await api(`/v1/admin/health${probe ? "?probe=true" : ""}`);
+    const dot = (s) => el("span", { class: `hdot ${s}`, "aria-hidden": "true" });
+    const probeLine = (p) => p ? el("p", { class: p.ok ? "help" : "module-note" }, p.ok ? `Live check passed in ${p.ms} ms` : `Live check failed after ${p.ms} ms: ${p.error}`) : "";
+    const card = (title, status, lines, extra = "") => el("article", { class: "module-panel health-card" }, el("div", { class: "health-head" }, dot(status), el("h3", {}, title)),
+      el("dl", { class: "health-list" }, lines.filter(Boolean).map(([k, v]) => el("div", {}, el("dt", {}, k), el("dd", {}, String(v))))), extra);
+    const upt = (s) => s > 3600 ? `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min` : `${Math.floor(s / 60)} min`;
+    const calls = Object.entries(h.agents.calls_last_24h);
+    main.replaceChildren(moduleFrame("CLOUDSEALS · OPERATIONS", "Service health", "What this environment is running on and whether each part is working. Live checks make small real calls to the model and the signing key.",
+      el("p", {}, el("button", { onclick: safe(async (e) => { e.currentTarget.disabled = true; e.currentTarget.textContent = "Checking…"; await draw(true); }) }, "Run live checks"), " ", el("button", { class: "secondary", onclick: () => draw(false) }, "Refresh")),
+      el("section", { class: "module-card-grid health-grid" },
+        card("Service", "ok", [["Revision", h.service.revision || "local"], ["Environment", h.service.environment], ["Sign-in", h.service.auth], ["Uptime", upt(h.service.uptime_seconds)]]),
+        card("Application state", h.state.last_save_error ? "bad" : h.state.durable ? "ok" : "warn", [["Storage", h.state.backend], ["Durable", h.state.durable ? "Yes" : "No (lost on restart)"],
+          ["Saves since start", h.state.saves], ["Last save", h.state.last_save_at ? new Date(h.state.last_save_at * 1000).toLocaleTimeString() : "none yet"], h.state.last_save_error ? ["Last error", h.state.last_save_error] : null]),
+        card("Evidence storage", h.evidence_store.backend === "local-disk" ? "warn" : "ok", [["Backend", h.evidence_store.backend]]),
+        card("AI model", h.model.probe ? (h.model.probe.ok ? "ok" : "bad") : h.model.configured ? "ok" : "off", [["Provider", h.model.provider || "none (deterministic agents only)"], ["Model", h.model.model_id || "n/a"]], probeLine(h.model.probe)),
+        card("Evidence signing", h.evidence_signing.probe ? (h.evidence_signing.probe.ok ? "ok" : "bad") : h.evidence_signing.configured ? "ok" : "off",
+          [["Signer", h.evidence_signing.configured ? "Cloud KMS" : "Local hash chain only"], ["Key version", h.evidence_signing.key_version ? h.evidence_signing.key_version.split("/").slice(-5).join("/") : "n/a"]], probeLine(h.evidence_signing.probe)),
+        card("Workflow runtime", h.runtime.mode === "sandbox" ? "warn" : "off", [["Mode", h.runtime.mode === "sandbox" ? "Sandbox (mock connector)" : "Unavailable in this environment"]]),
+        card("Agents, last 24 hours", calls.length ? "ok" : "off", [["Advisory agents registered", h.agents.advisory_agents], ...calls.map(([k, v]) => [k.replace("agent.", "").replaceAll("_", " "), v])]),
+        card("Records", "ok", [["Users", h.counts.users], ["Assessments", h.counts.assessments], ["Cases", h.counts.cases], ["Audit events", h.counts.audit_events]]))));
+  };
+  await draw(false);
 };
 
 
@@ -1080,6 +1135,8 @@ const FLOW_NODES = {
     ["trustops.inventory_agent", "Inventory Agent", "Reads documents and lists the AI use cases they evidence"],
     ["cloudseals.swaska.findings_summarizer", "Findings Summary", "Summarises candidate findings for reviewers"],
     ["trustops.gap_analysis_agent", "Gap Analysis", "Compares validated use cases with a framework"],
+    ["trustops.maturity_scorer", "Maturity Scorer", "Scores governance maturity on five principles"],
+    ["trustops.roadmap_agent", "Roadmap Agent", "Turns validated gaps into a prioritised plan"],
     ["cloudseals.swaska.poc_drafter", "POC Drafter", "Drafts scope notes for the POC blueprint"]],
 };
 const FLOW_STATE = { waiting: "Waiting", running: "Running…", done: "Done", skipped: "Skipped", failed: "Failed" };
@@ -1116,6 +1173,8 @@ const CAPTIONS = {
   "cloudseals.swaska.findings_summarizer": ["Reading candidate findings…", "Writing reviewer summaries…"],
   "trustops.inventory_agent": ["Reading the documents…", "Listing AI use cases…", "Checking every quote against the text…"],
   "trustops.gap_analysis_agent": ["Reading validated use cases…", "Comparing with framework requirements…", "Citing requirement IDs…"],
+  "trustops.maturity_scorer": ["Reading validated use cases and gaps…", "Scoring five principles…", "Checking every score has evidence…"],
+  "trustops.roadmap_agent": ["Reading validated gaps…", "Ordering by severity and dependency…", "Estimating effort and owners…"],
   "cloudseals.swaska.poc_drafter": ["Reading the draft blueprint…", "Writing scope notes…"],
 };
 
@@ -1221,11 +1280,26 @@ routes["agent-flow"] = async () => {
         return { state: "done", lines: r.items.length ? r.items.slice(0, 5).map((g) => `${g.severity.toUpperCase()} · ${g.framework_clause.replaceAll("_", " ")}: ${g.title}`) : ["No gaps were raised against the EU AI Act."] };
       }, { minMs: 2200 });
     }
-    if (!roles.some((r) => ["cloudseals_admin", "cloudseals_assessor"].includes(r))) skip(5, "Needs a CloudSeals assessor, after a reviewer has approved the report.");
+    const inv = staffReview ? await api(`/v1/assessments/${assessmentId}/inventory`) : null;
+    if (!staffReview) skip(5, "Needs a CloudSeals reviewer to validate use cases first.");
+    else if (!inv.use_cases.some((u) => u.status === "VALIDATED")) skip(5, "No validated use cases yet.");
+    else await act(5, async () => {
+      const r = await api(`/v1/assessments/${assessmentId}/maturity/run`, { method: "POST" });
+      if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
+      return r.maturity ? { state: "done", lines: [`Overall ${r.maturity.overall_score} / 5 (needs review)`, ...Object.entries(r.maturity.scores).map(([p, sc]) => `${PRINCIPLE_LABEL[p]}: ${sc}`)] } : { state: "skipped", lines: [r.note] };
+    }, { minMs: 2200 });
+    if (!staffReview) skip(6, "Needs a CloudSeals reviewer to validate gaps first.");
+    else if (!inv.gaps.some((g) => g.status === "VALIDATED") && inv.maturity?.status !== "VALIDATED") skip(6, "Validate a gap or the maturity score first.");
+    else await act(6, async () => {
+      const r = await api(`/v1/assessments/${assessmentId}/roadmap/run`, { method: "POST" });
+      if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
+      return { state: "done", lines: r.items.length ? [`${r.summary.total_items} items, about ${r.summary.total_effort_days} person-days`, ...r.items.slice(0, 4).map((i) => `${i.timeline_band} days: ${i.title}`)] : ["No usable roadmap items were returned."] };
+    }, { minMs: 2200 });
+    if (!roles.some((r) => ["cloudseals_admin", "cloudseals_assessor"].includes(r))) skip(7, "Needs a CloudSeals assessor, after a reviewer has approved the report.");
     else {
       const bp = (await api(`/v1/assessments/${assessmentId}/poc-blueprints`)).items[0];
-      if (!bp) skip(5, "No draft POC blueprint yet. An assessor creates one from the approved report.");
-      else await act(5, async () => {
+      if (!bp) skip(7, "No draft POC blueprint yet. An assessor creates one from the approved report.");
+      else await act(7, async () => {
         const r = await api(`/v1/assessments/${assessmentId}/poc-blueprints/${bp.blueprint_id}/draft-notes`, { method: "POST" });
         return { state: "done", lines: [r.scope_summary, ...r.open_questions.map((q) => `Open question: ${q}`)] };
       });
@@ -1250,7 +1324,7 @@ routes["agent-flow"] = async () => {
       await api(g.upload_url, { method: "PUT", body: data.buffer, headers: { "Content-Type": "application/octet-stream" } });
       toast("Demo assessment created"); await routes["agent-flow"]();
     }) }, "Create a demo assessment with sample evidence") : "";
-    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (6 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn));
+    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (8 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn));
   }
   drawControls(); draw();
   main.replaceChildren(moduleFrame("AGENTS · LIVE VIEW", "Agent Flow", "Press Run and watch each agent pick up the work, do its part and hand the result to the next one.",
@@ -1303,6 +1377,72 @@ function gapCard(aid, g, canReview, redraw) {
       : canReview ? reviewControls(g.title, async (status, reason) => { await api(`/v1/assessments/${aid}/gaps/${g.gap_id}`, { method: "PATCH", body: { status, reason } }); toast(`Gap ${status}`); redraw(); }) : "");
 }
 
+
+const PRINCIPLE_LABEL = { model_agnostic: "P1 Model Agnostic", neuro_symbolic: "P2 Neuro-Symbolic", digital_twin: "P3 Digital Twin", evidence_fabric: "P4 Evidence Fabric", model_welfare: "P5 Model Welfare" };
+const BAND_LABEL = { "0-90": "0 to 90 days", "90-180": "90 to 180 days", "180-365": "180 to 365 days", "365+": "Beyond 365 days" };
+function scoreBar(score) { const f = el("b", { role: "presentation" }); f.style.width = `${Math.round(score * 20)}%`; return el("i", { class: "mat-track" }, f); }
+
+function maturityPanel(aid, inv, canReview, validatedUc, redraw) {
+  const m = inv.maturity;
+  const run = el("button", { disabled: !validatedUc, title: validatedUc ? "" : "Validate at least one use case first", onclick: safe(async (e) => {
+    e.currentTarget.disabled = true; e.currentTarget.textContent = "Scoring…";
+    const r = await api(`/v1/assessments/${aid}/maturity/run`, { method: "POST" });
+    useCaseNote = r.mode === "unavailable" ? r.note : r.maturity ? "Maturity score drafted for review." : r.note;
+    await redraw();
+  }) }, m ? "Re-run maturity scoring" : "Run maturity scoring");
+  const body = m ? el("div", {},
+    el("div", { class: "mat-head" }, el("strong", { class: "mat-overall" }, `${m.overall_score}`), el("span", {}, " / 5 overall"), statusChip(m.status)),
+    Object.keys(PRINCIPLE_LABEL).map((p) => el("div", { class: "mat-row" }, el("div", { class: "mat-line" }, el("span", {}, PRINCIPLE_LABEL[p]), scoreBar(m.scores[p]), el("em", {}, String(m.scores[p]))),
+      el("p", { class: "uc-why" }, m.rationale[p], m.evidence_refs[p]?.length ? ` (${m.evidence_refs[p].length} cited item${m.evidence_refs[p].length === 1 ? "" : "s"})` : ""))),
+    m.capped_for_missing_evidence?.length ? el("p", { class: "module-note" }, `Scores for ${m.capped_for_missing_evidence.join(", ")} were capped at 2.0 because no evidence was cited for a score of 3 or more.`) : "",
+    m.improvement_priorities?.length ? el("div", {}, el("span", { class: "eyebrow" }, "IMPROVEMENT PRIORITIES"), el("ul", { class: "fw-controls" }, m.improvement_priorities.map((x) => el("li", {}, x)))) : "",
+    m.notes_for_architect ? el("p", { class: "help" }, `Notes for the architect: ${m.notes_for_architect}`) : "",
+    m.status !== "UNREVIEWED" ? el("p", { class: "help" }, `${STATUS_LABEL[m.status]} by ${m.reviewed_by}: ${m.review_reason}`)
+      : canReview ? reviewControls("Maturity", async (status, reason) => { await api(`/v1/assessments/${aid}/maturity`, { method: "PATCH", body: { status, reason } }); toast(`Maturity ${status}`); redraw(); }) : "")
+    : el("p", { class: "empty-state" }, validatedUc ? "No maturity score yet." : "Validate a use case to unlock maturity scoring.");
+  return el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 3 · MATURITY SCORER"), el("h3", {}, "Governance maturity"))),
+    el("p", { class: "help" }, "Five principles scored 1 to 5. A score of 3 or more needs cited evidence; otherwise it is capped at 2. The overall score is calculated here, not by the model."), el("div", { class: "row" }, run), body);
+}
+
+function roadmapPanel(aid, inv, canReview, ready, redraw) {
+  const items = inv.roadmap || [];
+  const run = el("button", { disabled: !ready, title: ready ? "" : "Validate a gap or the maturity score first", onclick: safe(async (e) => {
+    e.currentTarget.disabled = true; e.currentTarget.textContent = "Building roadmap…";
+    const r = await api(`/v1/assessments/${aid}/roadmap/run`, { method: "POST" });
+    useCaseNote = r.mode === "unavailable" ? r.note : `${r.items.length} roadmap item(s) drafted${r.rejected ? `; ${r.rejected} unusable item(s) were dropped` : ""}${r.uncovered_gaps?.length ? `; ${r.uncovered_gaps.length} critical or high gap(s) are not covered yet` : ""}.`;
+    await redraw();
+  }) }, items.length ? "Re-run roadmap" : "Build roadmap");
+  const card = (i) => el("article", { class: `uc-card uc-card-${String(i.status).toLowerCase()}` },
+    el("div", { class: "uc-head" }, el("h4", {}, i.title), el("span", { class: "tag" }, i.responsible_role), el("span", { class: "tag" }, `${i.effort_days} person-days`), el("span", { class: "tag" }, `cost: ${i.estimated_cost_band}`), statusChip(i.status)),
+    el("p", { class: "uc-desc" }, i.description),
+    i.timeline_adjusted ? el("p", { class: "module-note" }, "Moved into the first 90 days because it addresses a critical gap.") : "",
+    el("ul", { class: "fw-controls" }, i.success_criteria.map((c) => el("li", {}, c))),
+    i.dependencies.length ? el("p", { class: "help" }, `Depends on ${i.dependencies.length} other item${i.dependencies.length === 1 ? "" : "s"} in this roadmap.`) : "",
+    i.status !== "UNREVIEWED" ? el("p", { class: "help" }, `${STATUS_LABEL[i.status]} by ${i.reviewed_by}: ${i.review_reason}`)
+      : canReview ? reviewControls(i.title, async (status, reason) => { await api(`/v1/assessments/${aid}/roadmap/${i.item_id}`, { method: "PATCH", body: { status, reason } }); toast(`Roadmap item ${status}`); redraw(); }) : "");
+  const bands = ["0-90", "90-180", "180-365", "365+"].filter((b) => items.some((i) => i.timeline_band === b));
+  return el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 4 · ROADMAP AGENT"), el("h3", {}, `${items.length} roadmap item${items.length === 1 ? "" : "s"}`))),
+    el("p", { class: "help" }, "Built from validated gaps. Critical gaps always land in the first 90 days, dependencies are checked for loops, and effort totals are calculated here."),
+    el("div", { class: "row" }, run), bands.length ? bands.map((b) => el("div", {}, el("h4", { class: "section-title" }, BAND_LABEL[b]), el("div", { class: "uc-list" }, items.filter((i) => i.timeline_band === b).map(card))))
+      : el("p", { class: "empty-state" }, ready ? "No roadmap yet." : "Validate a gap or the maturity score to unlock the roadmap."));
+}
+
+async function reportPanel(aid) {
+  const st = await api(`/v1/assessments/${aid}/diagnostic-report?format=json`);
+  const dlBtn = (label, qs, cls = "") => el("button", { class: cls, onclick: safe(async (e) => { e.currentTarget.disabled = true; await dl(`/v1/assessments/${aid}/diagnostic-report${qs}`, `diagnostic-report-${st.status}.html`); e.currentTarget.disabled = false; }) }, label);
+  return el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 5 · REPORT"), el("h3", {}, "Diagnostic report"))),
+    el("p", { class: "help" }, "Contains only items a reviewer has validated. The narrative is optional and AI-drafted; everything else is assembled without a model."),
+    el("p", {}, el("span", { class: `tag ${st.status === "FINAL" ? "ok" : "medium"}` }, st.status), st.missing.length ? ` Still needed: ${st.missing.join("; ")}.` : " Ready to deliver after your final check."),
+    el("div", { class: "row" }, dlBtn("Download report (HTML)", ""), dlBtn("Download with AI narrative", "?narrative=true", "secondary")));
+}
+
+function pipelineStepper(inv) {
+  const v = (xs) => (xs || []).some((x) => x.status === "VALIDATED");
+  const steps = [["Inventory", v(inv.use_cases)], ["Gap analysis", v(inv.gaps)], ["Maturity", inv.maturity?.status === "VALIDATED"], ["Roadmap", v(inv.roadmap)]];
+  return el("ol", { class: "pipe-steps", "aria-label": "Diagnostic pipeline" }, steps.map(([n, done], i) => el("li", { class: done ? "is-done" : "" }, el("span", {}, done ? "✓" : String(i + 1)), n)),
+    el("li", { class: steps.every(([, d]) => d) ? "is-done" : "" }, el("span", {}, steps.every(([, d]) => d) ? "✓" : "5"), "Report"));
+}
+
 routes["use-cases"] = async (aidArg) => {
   const { items: assessments } = await api("/v1/assessments");
   if (!assessments.length) return main.replaceChildren(moduleFrame("DIAGNOSIS · AI INVENTORY", "AI use cases", "Read documents and list the AI use cases they evidence.",
@@ -1342,7 +1482,10 @@ routes["use-cases"] = async (aidArg) => {
     el("div", { class: "row" }, el("label", { class: "uc-picker" }, "Framework", fwSel), gapRun),
     gaps.length ? el("div", { class: "uc-list" }, gaps.map((g) => gapCard(aid, g, canReview, redraw))) : el("p", { class: "empty-state" }, validated ? "No gaps recorded yet. Run the analysis." : "Validate a use case to unlock gap analysis."))
     : el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "STEP 2 · GAP ANALYSIS"), el("p", { class: "help" }, inv.gaps_note || "Gap analysis is prepared by CloudSeals reviewers."));
-  main.replaceChildren(moduleFrame("DIAGNOSIS · AI INVENTORY", "AI use cases", "From documents to a reviewed inventory, then a framework gap analysis. Nothing here is saved as an answer, approved or published automatically.", useCasePanel, gapPanel));
+  const validatedGaps = inv.gaps.some((g) => g.status === "VALIDATED");
+  const staffPanels = canReview ? [maturityPanel(aid, inv, canReview, validated > 0, redraw), roadmapPanel(aid, inv, canReview, validatedGaps || inv.maturity?.status === "VALIDATED", redraw), await reportPanel(aid)] : [];
+  main.replaceChildren(moduleFrame("DIAGNOSIS · AI GOVERNANCE STUDIO", "Diagnostic studio", "From documents to a reviewed inventory, framework gaps, maturity, roadmap and report. Every step is a draft until a CloudSeals reviewer validates it.",
+    canReview ? pipelineStepper(inv) : "", useCasePanel, gapPanel, ...staffPanels));
 };
 
 routes.frameworks = async (fid) => {
@@ -1361,6 +1504,216 @@ routes.frameworks = async (fid) => {
     : el("p", { class: "empty-state" }, "Choose a framework to read its requirements and controls.");
   main.replaceChildren(moduleFrame("OPERATIONS · REFERENCE", "Frameworks", "The requirement and control definitions the gap analysis agent compares use cases against. Read-only.",
     el("section", { class: "module-card-grid fw-grid" }, cards), body));
+};
+
+
+// ---------- Users and access (CloudSeals admins) ----------
+const ROLE_LABEL = { cloudseals_admin: "Admin", cloudseals_assessor: "Assessor", cloudseals_reviewer: "Reviewer", cloudseals_platform_ops: "Platform ops", auditor_readonly: "Auditor (read only)",
+  customer_admin: "Customer admin", customer_architect: "Customer architect", customer_risk: "Customer risk", customer_controller: "Customer controller", customer_contributor: "Customer contributor" };
+const STAFF_ROLE_IDS = ["cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer", "cloudseals_platform_ops"];
+const CUSTOMER_ROLE_IDS = ["customer_admin", "customer_architect", "customer_risk", "customer_controller", "customer_contributor", "auditor_readonly"];
+const OWNER_BADGE = (roles) => STAFF_ROLE_IDS.every((r) => roles.includes(r));
+const roleChips = (roles) => OWNER_BADGE(roles) ? el("span", { class: "role-chips" }, el("span", { class: "role-chip staff" }, "Owner (all CloudSeals roles)")) : el("span", { class: "role-chips" }, roles.map((r) => el("span", { class: `role-chip${r.startsWith("cloudseals") ? " staff" : ""}` }, ROLE_LABEL[r] || r)));
+function roleChecks(ids, selected, name) {
+  return el("div", { class: "role-checks" }, ids.map((id) => el("label", { class: "role-check" }, el("input", { type: "checkbox", name, value: id, checked: selected.includes(id) }), ROLE_LABEL[id])));
+}
+const pickedRoles = (root, name) => [...root.querySelectorAll(`input[name="${name}"]:checked`)].map((i) => i.value);
+
+routes.users = async () => {
+  if (!state.me.roles.includes("cloudseals_admin")) return main.replaceChildren(moduleFrame("ADMINISTRATION", "Users", "Only CloudSeals admins manage access.", el("p", { class: "empty-state" }, "You do not have access to this page.")));
+  const [{ items, pending, staff_email_domains: domains, sign_in: signIn }, { items: tenants }] = await Promise.all([api("/v1/admin/users"), api("/v1/admin/tenants")]);
+  const redraw = () => routes.users();
+  const kind = el("select", { "aria-label": "Type of user" }, el("option", { value: "staff" }, "CloudSeals staff"), el("option", { value: "customer" }, "Customer user"));
+  const email = el("input", { type: "email", placeholder: "name@cloudseals.co.uk", required: true, maxlength: 254, "aria-label": "Email address" });
+  const tenantSel = el("select", { "aria-label": "Customer workspace" }, tenants.map((t) => el("option", { value: t.tenant_id }, t.name || t.tenant_id)));
+  const staffBox = roleChecks(STAFF_ROLE_IDS, ["cloudseals_reviewer"], "new-roles"), custBox = roleChecks(CUSTOMER_ROLE_IDS, ["customer_contributor"], "new-roles");
+  const tenantRow = el("label", {}, "Customer workspace", tenantSel);
+  const sync = () => { const staff = kind.value === "staff"; staffBox.hidden = !staff; custBox.hidden = staff; tenantRow.hidden = staff; };
+  kind.addEventListener("change", sync);
+  const form = el("form", { class: "module-panel user-form", onsubmit: safe(async (e) => {
+    e.preventDefault(); const staff = kind.value === "staff"; const roles = pickedRoles(staff ? staffBox : custBox, "new-roles");
+    if (!roles.length) return toast("Choose at least one role", true);
+    await api("/v1/admin/users", { method: "POST", body: { email: email.value.trim(), roles, tenant_id: staff ? null : tenantSel.value } });
+    toast("Added. Access starts when they first sign in with Google."); redraw();
+  }) }, el("span", { class: "eyebrow" }, "ADD A USER"), el("h3", {}, "Give someone access"),
+    signIn !== "google" ? el("p", { class: "module-note" }, "Adding people by email needs Google sign-in. Use workspace invitations for this environment.") : "",
+    el("div", { class: "row" }, el("label", {}, "Type", kind), el("label", { class: "grow" }, "Email", email)), tenantRow,
+    el("label", {}, "Roles"), staffBox, custBox,
+    el("p", { class: "help" }, `They sign in with this Google email; access begins at their first sign-in.${domains.length ? ` CloudSeals roles are limited to ${domains.join(", ")}.` : ""}`),
+    el("button", { disabled: signIn !== "google" }, "Add user"));
+  sync();
+
+  const row = (u) => {
+    const editor = el("div", { class: "user-edit", hidden: true });
+    const isStaff = u.roles.some((r) => r.startsWith("cloudseals"));
+    const boxes = roleChecks(isStaff ? STAFF_ROLE_IDS : CUSTOMER_ROLE_IDS, u.roles, `r-${u.sub}`);
+    editor.append(boxes, el("div", { class: "row" }, el("button", { onclick: safe(async () => {
+      const roles = pickedRoles(editor, `r-${u.sub}`); if (!roles.length) return toast("Choose at least one role", true);
+      await api(`/v1/admin/users/${encodeURIComponent(u.sub)}`, { method: "PATCH", body: { roles } }); toast("Roles updated"); redraw();
+    }) }, "Save roles"), el("button", { class: "secondary", onclick: () => { editor.hidden = true; } }, "Cancel")));
+    const remove = el("button", { class: "danger", disabled: u.is_self, title: u.is_self ? "You cannot remove yourself" : "", onclick: safe(async (e) => {
+      if (e.currentTarget.dataset.armed !== "1") { e.currentTarget.dataset.armed = "1"; e.currentTarget.textContent = "Click again to remove"; return; }
+      await api(`/v1/admin/users/${encodeURIComponent(u.sub)}`, { method: "DELETE" }); toast("User removed"); redraw();
+    }) }, "Remove");
+    return el("tr", {}, el("td", {}, el("strong", {}, u.email || u.sub), u.is_self ? el("span", { class: "tag ok" }, "you") : "", el("br"), el("small", { class: "help" }, u.email ? u.sub : "")),
+      el("td", {}, roleChips(u.roles), editor), el("td", {}, u.tenant_name || (isStaff ? "CloudSeals" : u.tenant_id || "")),
+      el("td", {}, el("div", { class: "row" }, el("button", { class: "secondary", onclick: () => { editor.hidden = !editor.hidden; } }, "Edit roles"),
+        isStaff && !STAFF_ROLE_IDS.every((r) => u.roles.includes(r)) ? el("button", { class: "secondary", title: "Grant every CloudSeals role", onclick: safe(async () => {
+          await api(`/v1/admin/users/${encodeURIComponent(u.sub)}`, { method: "PATCH", body: { roles: STAFF_ROLE_IDS } }); toast("Now an owner: all CloudSeals roles"); redraw();
+        }) }, "Make owner") : "", remove)));
+  };
+  const table = (head, rows) => el("div", { class: "table-wrap" }, el("table", { class: "module-table" }, el("thead", {}, el("tr", {}, head.map((h) => el("th", { scope: "col" }, h)))), el("tbody", {}, rows)));
+  const pend = pending.length ? el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "WAITING FOR FIRST SIGN-IN"), el("h3", {}, `${pending.length} pending`))),
+    table(["Email", "Roles", "Workspace", ""], pending.map((p) => el("tr", {}, el("td", {}, p.email), el("td", {}, roleChips(p.roles)), el("td", {}, p.tenant_name || "CloudSeals"),
+      el("td", {}, el("button", { class: "secondary", onclick: safe(async () => { await api(`/v1/admin/users/pending/${encodeURIComponent(p.email)}`, { method: "DELETE" }); toast("Invitation cancelled"); redraw(); }) }, "Cancel")))))) : "";
+  main.replaceChildren(moduleFrame("ADMINISTRATION · ACCESS", "Users", "Who can sign in, with which roles. Changes are recorded in the activity log.", form,
+    el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "MEMBERS"), el("h3", {}, `${items.length} user${items.length === 1 ? "" : "s"}`))),
+      table(["User", "Roles", "Workspace", ""], items.map(row))), pend));
+};
+
+
+// ---------- Cases: CloudSeals engagement tracking ----------
+const CASE_STATUS = ["draft", "intake", "inventory", "gap", "review", "report", "delivered", "archived"];
+const CASE_STATUS_LABEL = { draft: "Draft", intake: "Intake", inventory: "Inventory", gap: "Gap analysis", review: "In review", report: "Report", delivered: "Delivered", archived: "Archived" };
+const INDUSTRIES = ["financial_services", "pharma", "healthcare", "retail", "manufacturing", "energy", "public_sector", "technology", "other"];
+const FRAMEWORK_SHORT = { eu_ai_act: "EU AI Act", iso_42001: "ISO 42001", nist_ai_rmf: "NIST AI RMF", sr_11_7: "SR 11-7", fda_samd: "FDA SaMD" };
+const label = (v) => String(v).replaceAll("_", " ").replace(/^\w/, (c) => c.toUpperCase());
+const caseStatusChip = (s) => el("span", { class: `case-status cs-${s}` }, CASE_STATUS_LABEL[s] || s);
+const when = (t) => new Date(t * 1000).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+const staffName = (a) => a.email || a.sub;
+
+routes.cases = async () => {
+  const [{ items }, { items: staff }] = await Promise.all([api("/v1/cases"), api("/v1/staff")]);
+  const canCreate = state.me.roles.some((r) => ["cloudseals_admin", "cloudseals_assessor"].includes(r));
+  let tenants = []; try { tenants = (await api("/v1/admin/tenants")).items; } catch { /* only some staff roles may list workspaces */ }
+  const view = { status: "all", q: "", sort: "newest" };
+  const list = el("div", { class: "table-wrap" });
+  const chips = el("div", { class: "case-filters", role: "group", "aria-label": "Filter by status" });
+  const draw = () => {
+    chips.replaceChildren(...["all", ...CASE_STATUS].map((s) => el("button", { class: `chip${view.status === s ? " on" : ""}`, onclick: () => { view.status = s; draw(); } },
+      s === "all" ? "All" : CASE_STATUS_LABEL[s], el("em", {}, String(s === "all" ? items.length : items.filter((c) => c.status === s).length)))));
+    const rows = items.filter((c) => (view.status === "all" || c.status === view.status) && (!view.q || `${c.title} ${c.customer_name}`.toLowerCase().includes(view.q.toLowerCase())))
+      .sort((a, b) => view.sort === "customer" ? a.customer_name.localeCompare(b.customer_name) : view.sort === "oldest" ? a.created_at - b.created_at : b.created_at - a.created_at);
+    list.replaceChildren(rows.length ? el("table", { class: "module-table" }, el("thead", {}, el("tr", {}, ["Case", "Frameworks", "Status", "Risk", "Maturity", "Updated", ""].map((h) => el("th", { scope: "col" }, h)))),
+      el("tbody", {}, rows.map((c) => el("tr", {}, el("td", {}, el("a", { href: `#/case/${c.case_id}` }, el("strong", {}, c.title)), el("br"), el("small", { class: "help" }, `${c.customer_name} · ${label(c.tier)}`)),
+        el("td", {}, c.frameworks_in_scope.map((f) => el("span", { class: "tag" }, FRAMEWORK_SHORT[f] || f))), el("td", {}, caseStatusChip(c.status)),
+        el("td", {}, c.progress.risk_level ? el("span", { class: `tag ${TIER_CLASS[c.progress.risk_level] || ""}` }, TIER_LABEL[c.progress.risk_level]) : "—"),
+        el("td", {}, c.progress.maturity_score != null ? `${c.progress.maturity_score} / 5` : "—"), el("td", {}, when(c.updated_at)),
+        el("td", {}, el("a", { href: `#/case/${c.case_id}` }, "Open →")))))) : el("p", { class: "empty-state" }, items.length ? "No cases match this filter." : "No cases yet. Create the first one."));
+  };
+  const form = el("form", { class: "module-panel user-form", hidden: true, onsubmit: safe(async (e) => {
+    e.preventDefault(); const d = new FormData(form);
+    const body = { title: d.get("title"), customer_name: d.get("customer"), industry: d.get("industry"), region: d.get("region"), tier: d.get("tier"),
+      frameworks_in_scope: d.getAll("fw"), lead_architect: d.get("lead") || null, architects: d.getAll("arch"), target_delivery_date: d.get("due") || null, notes: d.get("notes") || "", tenant_id: d.get("tenant") || null };
+    const c = await api("/v1/cases", { method: "POST", body }); toast("Case created"); go(`#/case/${c.case_id}`);
+  }) }, el("span", { class: "eyebrow" }, "NEW CASE"), el("h3", {}, "Open a diagnostic engagement"),
+    el("div", { class: "row" }, el("label", { class: "grow" }, "Case title", el("input", { name: "title", required: true, minlength: 3, maxlength: 200, placeholder: "e.g. Demo Bank AI governance review Q4" })),
+      el("label", { class: "grow" }, "Customer", el("input", { name: "customer", required: true, minlength: 2, maxlength: 200, placeholder: "e.g. Demo Bank plc" }))),
+    el("div", { class: "row" }, el("label", {}, "Industry", el("select", { name: "industry" }, INDUSTRIES.map((i) => el("option", { value: i }, label(i))))),
+      el("label", {}, "Region", el("select", { name: "region" }, ["UK", "EU", "US", "APAC", "Other"].map((r) => el("option", { value: r }, r)))),
+      el("label", {}, "Tier", el("select", { name: "tier" }, ["tier_1", "tier_2", "tier_3"].map((t) => el("option", { value: t }, label(t))))),
+      el("label", {}, "Target delivery", el("input", { name: "due", type: "date" })),
+      tenants.length ? el("label", {}, "Customer workspace (optional)", el("select", { name: "tenant" }, el("option", { value: "" }, "None yet"), tenants.map((t) => el("option", { value: t.tenant_id }, t.name || t.tenant_id)))) : ""),
+    el("label", {}, "Frameworks in scope"), el("div", { class: "role-checks" }, Object.entries(FRAMEWORK_SHORT).map(([id, n]) => el("label", { class: "role-check" }, el("input", { type: "checkbox", name: "fw", value: id, checked: id === "eu_ai_act" }), n))),
+    el("label", {}, "Lead architect", el("select", { name: "lead" }, staff.map((a) => el("option", { value: a.sub, selected: a.sub === state.me.sub }, staffName(a))))),
+    el("label", {}, "Other architects"), el("div", { class: "role-checks" }, staff.map((a) => el("label", { class: "role-check" }, el("input", { type: "checkbox", name: "arch", value: a.sub }), staffName(a)))),
+    el("label", {}, "Notes", el("textarea", { name: "notes", rows: 2, maxlength: 4000 })), el("div", { class: "row" }, el("button", {}, "Create case"), el("button", { type: "button", class: "secondary", onclick: () => { form.hidden = true; } }, "Cancel")));
+  const search = el("input", { type: "search", placeholder: "Search cases or customers", "aria-label": "Search cases", oninput: (e) => { view.q = e.target.value; draw(); } });
+  const sort = el("select", { "aria-label": "Sort", onchange: (e) => { view.sort = e.target.value; draw(); } }, [["newest", "Newest first"], ["oldest", "Oldest first"], ["customer", "Customer A to Z"]].map(([v, l]) => el("option", { value: v }, l)));
+  const open = items.filter((c) => !["delivered", "archived"].includes(c.status)).length;
+  main.replaceChildren(moduleFrame("CLOUDSEALS · ENGAGEMENTS", "Cases", "One case per customer engagement: who is assigned, which assessments belong to it, how far the review has got.",
+    el("section", { class: "module-metrics compact" }, [["Cases", items.length], ["Open", open], ["Delivered", items.filter((c) => c.status === "delivered").length]].map(([k, v]) => el("article", {}, el("span", {}, k), el("strong", {}, String(v))))),
+    canCreate ? el("p", {}, el("button", { onclick: () => { form.hidden = !form.hidden; } }, "+ New case")) : "", form,
+    el("section", { class: "module-panel" }, el("div", { class: "row case-tools" }, search, sort), chips, list)));
+  draw();
+};
+
+routes.case = async (cid) => {
+  let tab = "overview";
+  const draw = async () => {
+    const [c, staff] = await Promise.all([api(`/v1/cases/${cid}`), api("/v1/staff")]);
+    const isLead = state.me.roles.includes("cloudseals_admin") || c.lead_architect === state.me.sub;
+    const tabs = el("div", { class: "case-tabs", role: "tablist" }, [["overview", "Overview"], ["assessments", `Assessments (${c.assessments.length})`], ["activity", "Activity"]].map(([id, l]) =>
+      el("button", { role: "tab", class: `tab${tab === id ? " on" : ""}`, "aria-selected": String(tab === id), onclick: () => { tab = id; draw(); } }, l)));
+    let body;
+    if (tab === "overview") {
+      const next = el("select", { "aria-label": "New status" }, CASE_STATUS.map((s) => el("option", { value: s, selected: s === c.status }, CASE_STATUS_LABEL[s])));
+      const why = el("input", { placeholder: "Reason (required)", maxlength: 2000, "aria-label": "Reason for status change" });
+      const p = c.progress;
+      const steps = [["Use cases", p.validated_use_cases > 0], ["Gaps", p.validated_gaps > 0], ["Maturity", p.maturity_score != null], ["Roadmap", p.validated_roadmap_items > 0], ["Report", p.report === "final"]];
+      const fields = [["Customer", c.customer_name], ["Industry", label(c.industry)], ["Region", c.region], ["Tier", label(c.tier)], ["Target delivery", c.target_delivery_date || "Not set"],
+        ["Lead architect", staffName(c.architects.find((a) => a.is_lead) || { sub: c.lead_architect })], ["Architects", c.architects.map(staffName).join(", ")], ["Created", when(c.created_at)]];
+      const edit = el("form", { class: "user-edit", hidden: true, onsubmit: safe(async (e) => {
+        e.preventDefault(); const d = new FormData(edit);
+        await api(`/v1/cases/${cid}`, { method: "PATCH", body: { tier: d.get("tier"), target_delivery_date: d.get("due") || null, notes: d.get("notes"), frameworks_in_scope: d.getAll("fw"), lead_architect: d.get("lead"), architects: d.getAll("arch") } });
+        toast("Case updated"); draw();
+      }) }, el("div", { class: "row" }, el("label", {}, "Tier", el("select", { name: "tier" }, ["tier_1", "tier_2", "tier_3"].map((t) => el("option", { value: t, selected: t === c.tier }, label(t))))),
+        el("label", {}, "Target delivery", el("input", { name: "due", type: "date", value: c.target_delivery_date || "" })),
+        el("label", {}, "Lead architect", el("select", { name: "lead" }, staff.items.map((a) => el("option", { value: a.sub, selected: a.sub === c.lead_architect }, staffName(a)))))),
+        el("label", {}, "Frameworks"), el("div", { class: "role-checks" }, Object.entries(FRAMEWORK_SHORT).map(([id, n]) => el("label", { class: "role-check" }, el("input", { type: "checkbox", name: "fw", value: id, checked: c.frameworks_in_scope.includes(id) }), n))),
+        el("label", {}, "Architects"), el("div", { class: "role-checks" }, staff.items.map((a) => el("label", { class: "role-check" }, el("input", { type: "checkbox", name: "arch", value: a.sub, checked: c.architects.some((x) => x.sub === a.sub) }), staffName(a)))),
+        el("label", {}, "Notes", el("textarea", { name: "notes", rows: 3, maxlength: 4000 }, c.notes || "")), el("div", { class: "row" }, el("button", {}, "Save"), el("button", { type: "button", class: "secondary", onclick: () => { edit.hidden = true; } }, "Cancel")));
+      body = el("div", {}, el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "PROGRESS"), el("h3", {}, "What a reviewer has validated"))),
+        el("ol", { class: "pipe-steps" }, steps.map(([n, done], i) => el("li", { class: done ? "is-done" : "" }, el("span", {}, done ? "✓" : String(i + 1)), n))),
+        el("p", { class: "help" }, `${p.validated_use_cases} use case(s), ${p.validated_gaps} gap(s), ${p.validated_roadmap_items} roadmap item(s). Risk level: ${p.risk_level ? TIER_LABEL[p.risk_level] : "not set"}. Maturity: ${p.maturity_score != null ? `${p.maturity_score} / 5` : "not scored"}. Report: ${p.report}.`)),
+        el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "DETAILS"), el("h3", {}, "Engagement")),
+          isLead ? el("button", { class: "secondary", onclick: () => { edit.hidden = !edit.hidden; } }, "Edit") : ""),
+          el("dl", { class: "uc-meta" }, fields.map(([k, v]) => el("div", {}, el("dt", {}, k), el("dd", {}, v)))), c.notes ? el("p", { class: "uc-why" }, c.notes) : "", edit),
+        el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "STATUS"), el("h3", {}, "Move the case on"),
+          isLead ? el("div", { class: "row" }, next, why, el("button", { onclick: safe(async () => { if (!why.value.trim()) return toast("Enter a reason first", true);
+            await api(`/v1/cases/${cid}/status`, { method: "POST", body: { status: next.value, reason: why.value.trim() } }); toast("Status updated"); draw(); }) }, "Update status"))
+            : el("p", { class: "help" }, "Only the lead architect or an admin changes the status."),
+          el("p", { class: "help" }, "Delivered needs a FINAL diagnostic report on a linked assessment."),
+          el("ul", { class: "case-history" }, [...c.status_history].reverse().map((h) => el("li", {}, caseStatusChip(h.status), ` ${when(h.at)} · ${h.by} · ${h.reason}`)))));
+    } else if (tab === "assessments") {
+      const all = (await api("/v1/assessments")).items.filter((a) => !c.assessment_ids.includes(a.assessment_id) && (!c.tenant_id || a.tenant_id === c.tenant_id));
+      const evidence = await Promise.all(c.assessments.map(async (a) => ({ a, ev: (await api(`/v1/assessments/${a.assessment_id}/evidence`)).items })));
+      const pick = el("select", { "aria-label": "Assessment to link" }, all.map((a) => el("option", { value: a.assessment_id }, `${a.ai_system_name} (${a.status})`)));
+      body = el("div", {}, el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "LINKED ASSESSMENTS"), el("h3", {}, `${c.assessments.length} assessment${c.assessments.length === 1 ? "" : "s"}`),
+        evidence.length ? evidence.map(({ a, ev }) => el("article", { class: "uc-card" }, el("div", { class: "uc-head" }, el("h4", {}, a.ai_system_name), el("span", { class: "tag" }, a.status),
+          el("a", { href: `#/use-cases/${a.assessment_id}` }, "Diagnostic studio →"), el("a", { href: `#/assessment/${a.assessment_id}` }, "Assessment →"),
+          isLead ? el("button", { class: "secondary", onclick: safe(async () => { await api(`/v1/cases/${cid}/assessments/${a.assessment_id}`, { method: "DELETE" }); toast("Unlinked"); draw(); }) }, "Unlink") : ""),
+          el("p", { class: "help" }, "Documents"), ev.length ? el("ul", { class: "fw-controls" }, ev.map((e) => el("li", {}, `${e.filename} `, el("span", { class: `tag ${e.state === "clean" ? "ok" : "high"}` }, e.state)))) : el("p", { class: "help" }, "No documents uploaded yet.")))
+          : el("p", { class: "empty-state" }, "No assessment is linked yet."),
+        isLead ? el("div", { class: "row" }, all.length ? pick : el("span", { class: "help" }, "No other assessments are available to link."), all.length ? el("button", { onclick: safe(async () => {
+          await api(`/v1/cases/${cid}/assessments`, { method: "POST", body: { assessment_id: pick.value } }); toast("Linked"); draw(); }) }, "Link assessment") : "") : ""));
+    } else {
+      const { items } = await api(`/v1/cases/${cid}/audit`);
+      body = el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "ACTIVITY"), el("h3", {}, `${items.length} recorded event${items.length === 1 ? "" : "s"}`),
+        items.length ? el("div", { class: "table-wrap" }, el("table", { class: "module-table" }, el("thead", {}, el("tr", {}, ["When", "Who", "Action", "Reference"].map((h) => el("th", { scope: "col" }, h)))),
+          el("tbody", {}, items.map((a) => el("tr", {}, el("td", {}, new Date(a.at * 1000).toLocaleString()), el("td", {}, a.email || a.sub), el("td", {}, a.action), el("td", {}, String(a.ref).slice(0, 44))))))) : el("p", { class: "empty-state" }, "Nothing recorded yet."));
+    }
+    main.replaceChildren(moduleFrame("CLOUDSEALS · CASE", c.title, `${c.customer_name} · ${label(c.tier)}`, el("p", {}, el("a", { href: "#/cases" }, "← All cases"), " ", caseStatusChip(c.status)), tabs, body));
+  };
+  await draw();
+};
+
+
+// ---------- Customer workspaces: read-only view for CloudSeals staff ----------
+routes.workspaces = async () => {
+  const { items } = await api("/v1/admin/workspaces");
+  main.replaceChildren(moduleFrame("CLOUDSEALS · CUSTOMERS", "Customer workspaces", "See what each customer sees. This is a read-only view: customer actions are done by the customer's own users.",
+    items.length ? el("section", { class: "module-card-grid" }, items.map((w) => el("a", { class: "module-card module-card-link", href: `#/workspace/${w.tenant_id}` },
+      el("span", { class: "module-card-status" }, w.pending_approvals ? `${w.pending_approvals} APPROVAL${w.pending_approvals === 1 ? "" : "S"} WAITING` : "WORKSPACE"), el("h3", {}, w.name),
+      el("p", {}, `${w.assessments} assessment${w.assessments === 1 ? "" : "s"} · ${w.runs} workflow run${w.runs === 1 ? "" : "s"} · ${w.users} user${w.users === 1 ? "" : "s"}`), el("span", { class: "module-card-open" }, "View workspace →"))))
+      : el("p", { class: "empty-state" }, "No customer workspace has been activated yet.")));
+};
+
+routes.workspace = async (tid) => {
+  const w = await api(`/v1/admin/workspaces/${encodeURIComponent(tid)}`);
+  const table = (head, rows, empty) => rows.length ? el("div", { class: "table-wrap" }, el("table", { class: "module-table" }, el("thead", {}, el("tr", {}, head.map((h) => el("th", { scope: "col" }, h)))), el("tbody", {}, rows))) : el("p", { class: "empty-state" }, empty);
+  main.replaceChildren(moduleFrame("CLOUDSEALS · CUSTOMER WORKSPACE", w.tenant.name || w.tenant.tenant_id, [w.tenant.industry, w.tenant.residency_profile].filter(Boolean).join(" · ") || "Customer workspace",
+    el("p", {}, el("a", { href: "#/workspaces" }, "← All workspaces")),
+    el("p", { class: "module-note" }, "Read-only view for CloudSeals staff. You can look at everything here, but approvals and customer answers stay with the customer's own users."),
+    el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "ASSESSMENTS"), el("h3", {}, `${w.assessments.length} assessment${w.assessments.length === 1 ? "" : "s"}`),
+      table(["AI system", "Status", "", ""], w.assessments.map((a) => el("tr", {}, el("td", {}, a.ai_system_name), el("td", {}, el("span", { class: "tag" }, a.status)),
+        el("td", {}, el("a", { href: `#/assessment/${a.assessment_id}` }, "Open assessment →")), el("td", {}, el("a", { href: `#/use-cases/${a.assessment_id}` }, "Diagnostic studio →")))), "No assessments yet.")),
+    el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "WORKFLOW RUNS"), el("h3", {}, w.pending_approvals ? `${w.pending_approvals} waiting for a customer controller` : "Recent runs"),
+      table(["Receipt", "Amount", "Status", "Started by", ""], w.runs.map((r) => el("tr", {}, el("td", {}, r.receipt_id), el("td", {}, r.amount_minor != null ? `${r.currency} ${(r.amount_minor / 100).toFixed(2)}` : ""),
+        el("td", {}, el("span", { class: `tag ${r.status === "approval_required" ? "medium" : r.status === "completed" ? "ok" : ""}` }, r.status.replaceAll("_", " "))), el("td", {}, r.created_by),
+        el("td", {}, el("a", { href: `#/trustops/${r.run_id}` }, "Open run →")))), "No workflow runs yet.")),
+    el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "PEOPLE"), el("h3", {}, `${w.members.length} user${w.members.length === 1 ? "" : "s"}`),
+      table(["User", "Roles"], w.members.map((m) => el("tr", {}, el("td", {}, m.email || m.sub), el("td", {}, roleChips(m.roles)))), "No users yet."))));
 };
 
 // ---------- boot ----------

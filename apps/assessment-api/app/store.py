@@ -8,7 +8,8 @@ from typing import Any
 class Store:
     def __init__(self) -> None:
         self.lock = threading.RLock()
-        self.users: dict[str, dict[str, Any]] = {}          # sub -> {tenant_id, roles}
+        self.users: dict[str, dict[str, Any]] = {}          # sub -> {tenant_id, roles, email?}
+        self.pending_users: dict[str, dict[str, Any]] = {}  # verified email -> {tenant_id, roles, invited_by, at}; activated at first sign-in
         self.tenants: dict[str, dict[str, Any]] = {}
         self.assessments: dict[str, dict[str, Any]] = {}
         self.answers: dict[tuple[str, str, str], dict[str, Any]] = {}   # (assessment, scope, qid)
@@ -17,6 +18,7 @@ class Store:
         self.findings: dict[str, list[dict]] = {}
         self.reports: dict[str, dict[str, Any]] = {}
         self.blueprints: dict[str, dict[str, Any]] = {}
+        self.cases: dict[str, dict[str, Any]] = {}           # CloudSeals engagement cases (staff only), may link several assessments
         self.inventory: dict[str, dict[str, Any]] = {}       # assessment -> {"use_cases": [...], "gaps": [...]} (UNREVIEWED until validated)
         self.idempotency: dict[tuple[str, str, str], Any] = {}
         self.registrations: list[dict[str, Any]] = []

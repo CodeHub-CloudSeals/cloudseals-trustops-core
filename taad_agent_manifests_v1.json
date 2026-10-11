@@ -133,6 +133,65 @@
         "severity",
         "evidence_use_case_ids"
       ]
+    },
+    {
+      "agent_id": "trustops.maturity_scorer",
+      "purpose": "Score governance maturity on five principles from reviewer-validated use cases and gaps; scores without cited evidence are capped",
+      "approved_capabilities": [
+        "READ_VALIDATED_USE_CASES",
+        "READ_VALIDATED_GAPS",
+        "SUGGEST_MATURITY_SCORE"
+      ],
+      "tool_allowlist": [
+        "get_validated_use_cases",
+        "get_validated_gaps"
+      ],
+      "model_route": "structured-deep",
+      "fallback": "None: returns no score and says a model is required",
+      "output_item_required": [
+        "scores",
+        "rationale",
+        "evidence_refs"
+      ]
+    },
+    {
+      "agent_id": "trustops.roadmap_agent",
+      "purpose": "Turn validated gaps into a prioritised remediation roadmap; critical gaps are forced into the first 90 days and dependencies are checked for cycles",
+      "approved_capabilities": [
+        "READ_VALIDATED_GAPS",
+        "READ_VALIDATED_MATURITY",
+        "SUGGEST_ROADMAP_ITEM"
+      ],
+      "tool_allowlist": [
+        "get_validated_gaps",
+        "get_validated_maturity"
+      ],
+      "model_route": "structured-deep",
+      "fallback": "None: returns no items and says a model is required",
+      "output_item_required": [
+        "title",
+        "gap_ids_addressed",
+        "timeline_band",
+        "effort_days",
+        "success_criteria"
+      ]
+    },
+    {
+      "agent_id": "trustops.report_writer",
+      "purpose": "Draft the executive narrative of the diagnostic report from validated figures only; the report body itself is deterministic",
+      "approved_capabilities": [
+        "READ_VALIDATED_FIGURES",
+        "DRAFT_NARRATIVE"
+      ],
+      "tool_allowlist": [
+        "get_report_facts"
+      ],
+      "model_route": "structured-fast",
+      "fallback": "Report is produced without narrative",
+      "output_item_required": [
+        "executive_summary",
+        "key_themes"
+      ]
     }
   ]
 }

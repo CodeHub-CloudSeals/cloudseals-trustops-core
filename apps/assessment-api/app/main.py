@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import time
 import uuid
@@ -20,7 +21,7 @@ from pydantic import BaseModel, Field
 from question_engine import candidate_findings, eligible_questions, load_registry
 from question_engine.branching import is_eligible
 
-from . import llm, persist, swaska, taad_agents, trustops_runtime, use_cases
+from . import llm, persist, studio, swaska, taad_agents, trustops_runtime, use_cases
 from .evidence import inspect, make_store
 from .security import AUTH_MODE, AUTH_PROVIDER, CLOUDSEALS_ROLES, ENV, issue_token, verify_identity
 from .store import Store
@@ -110,6 +111,10 @@ def authenticated_sub(ident: dict = Depends(authenticated_identity)) -> str:
     return ident["sub"]
 
 
+# The environment owner holds every CloudSeals role.
+OWNER_ROLES = ["cloudseals_admin", "cloudseals_assessor", "cloudseals_platform_ops", "cloudseals_reviewer"]
+
+
 def maybe_bootstrap_first_admin(ident: dict) -> bool:
     """One-time first CloudSeals admin: the verified Google email named in TAAD_FIRST_ADMIN_EMAIL, dev environment only,
     only while no admin exists. Recorded in the audit log and the durable state; the setting is inert afterwards."""
@@ -119,7 +124,7 @@ def maybe_bootstrap_first_admin(ident: dict) -> bool:
     with STORE.lock:
         if STORE.admin_bootstrap or any("cloudseals_admin" in u.get("roles", []) for u in STORE.users.values()):
             return False
-        STORE.users[ident["sub"]] = {"tenant_id": None, "roles": ["cloudseals_admin"], "email": want}
+        STORE.users[ident["sub"]] = {"tenant_id": None, "roles": list(OWNER_ROLES), "email": want}
         STORE.admin_bootstrap.update({"completed_at": time.time(), "sub": ident["sub"], "email": want})
         STORE.audit.append({"at": time.time(), "sub": ident["sub"], "tenant_id": None, "action": "admin.bootstrap",
                             "ref": "first_cloudseals_admin"})
@@ -128,13 +133,31 @@ def maybe_bootstrap_first_admin(ident: dict) -> bool:
     return True
 
 
+def maybe_activate_pending(ident: dict) -> bool:
+    """An admin pre-registered this verified email; the first sign-in turns it into a membership (once)."""
+    email = ident.get("email")
+    if not (email and ident.get("email_verified")):
+        return False
+    with STORE.lock:
+        inv = STORE.pending_users.pop(email, None)
+        if not inv:
+            return False
+        STORE.users[ident["sub"]] = {"tenant_id": inv["tenant_id"], "roles": inv["roles"], "email": email}
+        STORE.audit.append({"at": time.time(), "sub": ident["sub"], "tenant_id": inv["tenant_id"], "action": "user.activated", "ref": email})
+    if persist.enabled():
+        persist.save(STORE)
+    return True
+
+
 def principal(ident: dict = Depends(authenticated_identity)) -> Principal:
     sub = ident["sub"]
     user = STORE.users.get(sub)
-    if not user and maybe_bootstrap_first_admin(ident):
+    if not user and (maybe_bootstrap_first_admin(ident) or maybe_activate_pending(ident)):
         user = STORE.users.get(sub)
     if not user:
         raise err(401, "unauthenticated", "Invalid token")
+    if ident.get("email_verified") and ident.get("email") and user.get("email") != ident["email"]:
+        user["email"] = ident["email"]    # kept for display; persisted with the next write
     return Principal(sub=sub, tenant_id=user.get("tenant_id"), roles=user["roles"])
 
 
@@ -734,7 +757,10 @@ class ReviewItem(BaseModel):
 
 
 def _inv(aid: str) -> dict:
-    return STORE.inventory.setdefault(aid, {"use_cases": [], "gaps": []})
+    inv = STORE.inventory.setdefault(aid, {"use_cases": [], "gaps": []})
+    inv.setdefault("maturity", None)
+    inv.setdefault("roadmap", [])
+    return inv
 
 
 def _merge(existing: list[dict], fresh: list[dict], key: str, keep: Any) -> list[dict]:
@@ -786,8 +812,9 @@ def run_inventory(aid: str, body: InventoryRunRequest, p: Principal = Depends(pr
 def get_inventory(aid: str, p: Principal = Depends(principal)):
     get_assessment(p, aid)
     inv = _inv(aid)
-    visible_gaps = inv["gaps"] if p.is_staff else []   # gaps are reviewer material until a report is published
-    return {"use_cases": inv["use_cases"], "gaps": visible_gaps, "gaps_note": None if p.is_staff else "Gap analysis is visible after reviewer approval"}
+    staff = p.is_staff   # gaps, maturity and the roadmap are reviewer material until a report is published
+    return {"use_cases": inv["use_cases"], "gaps": inv["gaps"] if staff else [], "maturity": inv["maturity"] if staff else None,
+            "roadmap": inv["roadmap"] if staff else [], "gaps_note": None if staff else "Gap analysis, maturity and roadmap follow reviewer approval"}
 
 
 @app.patch("/v1/assessments/{aid}/inventory/use-cases/{uid}")
@@ -832,6 +859,450 @@ def review_gap(aid: str, gid: str, body: ReviewItem, p: Principal = Depends(prin
         gap.update(status=body.status.upper(), reviewed_by=p.sub, review_reason=body.reason, reviewed_at=time.time())
         audit(p, f"gap.{body.status}", gid)
     return gap
+
+
+@app.post("/v1/assessments/{aid}/maturity/run")
+def run_maturity(aid: str, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    agent_throttle(p, taad_agents.MATURITY)
+    inv = _inv(aid)
+    ucs = [u for u in inv["use_cases"] if u["status"] == "VALIDATED"]
+    if not ucs:
+        raise err(409, "no_validated_use_cases", "Validate at least one AI use case before maturity scoring")
+    result = studio.run_maturity(SWASKA_CLIENT, ucs, [g for g in inv["gaps"] if g["status"] == "VALIDATED"])
+    with STORE.lock:
+        if result["maturity"] and not (inv["maturity"] and inv["maturity"]["status"] == "VALIDATED"):
+            inv["maturity"] = result["maturity"]        # a validated score is never silently replaced
+        audit(p, "agent.maturity", aid)
+    return {**result, "agent_id": taad_agents.MATURITY, "advisory_only": True, "maturity": inv["maturity"]}
+
+
+@app.patch("/v1/assessments/{aid}/maturity")
+def review_maturity(aid: str, body: ReviewItem, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    with STORE.lock:
+        m = _inv(aid)["maturity"]
+        if not m:
+            raise err(404, "not_found", "No maturity score yet")
+        m.update(status=body.status.upper(), reviewed_by=p.sub, review_reason=body.reason, reviewed_at=time.time())
+        audit(p, f"maturity.{body.status}", aid)
+    return m
+
+
+@app.post("/v1/assessments/{aid}/roadmap/run")
+def run_roadmap(aid: str, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    agent_throttle(p, taad_agents.ROADMAP)
+    inv = _inv(aid)
+    gaps = [g for g in inv["gaps"] if g["status"] == "VALIDATED"]
+    mat = inv["maturity"] if inv["maturity"] and inv["maturity"]["status"] == "VALIDATED" else None
+    if not gaps and not mat:
+        raise err(409, "nothing_validated", "Validate at least one gap or the maturity score before building a roadmap")
+    result = studio.run_roadmap(SWASKA_CLIENT, gaps, mat)
+    with STORE.lock:
+        decided = {i["item_id"]: i for i in inv["roadmap"] if i["status"] != "UNREVIEWED"}
+        inv["roadmap"] = list(decided.values()) + [i for i in result["items"] if i["item_id"] not in decided]
+        audit(p, "agent.roadmap", aid)
+    return {**result, "agent_id": taad_agents.ROADMAP, "advisory_only": True, "roadmap": inv["roadmap"]}
+
+
+@app.patch("/v1/assessments/{aid}/roadmap/{item_id}")
+def review_roadmap_item(aid: str, item_id: str, body: ReviewItem, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    with STORE.lock:
+        it = next((i for i in _inv(aid)["roadmap"] if i["item_id"] == item_id), None)
+        if not it:
+            raise err(404, "not_found", "Roadmap item not found")
+        it.update(status=body.status.upper(), reviewed_by=p.sub, review_reason=body.reason, reviewed_at=time.time())
+        audit(p, f"roadmap.{body.status}", item_id)
+    return it
+
+
+@app.get("/v1/assessments/{aid}/diagnostic-report")
+def diagnostic_report(aid: str, narrative: bool = False, format: Literal["html", "json"] = "html", p: Principal = Depends(principal)):
+    """Reviewer-validated material only. HTML is delivered as a download (the portal CSP forbids rendering it in place)."""
+    a = get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    inv = _inv(aid)
+    ucs = [u for u in inv["use_cases"] if u["status"] == "VALIDATED"]
+    gaps = [g for g in inv["gaps"] if g["status"] == "VALIDATED"]
+    mat = inv["maturity"] if inv["maturity"] and inv["maturity"]["status"] == "VALIDATED" else None
+    road = [i for i in inv["roadmap"] if i["status"] == "VALIDATED"]
+    status, missing = studio.report_status(ucs, mat, road)
+    facts = studio.report_facts(ucs, gaps, mat, road)
+    if format == "json":
+        return {"status": status, "missing": missing, "facts": facts}
+    story = studio.draft_narrative(SWASKA_CLIENT, facts) if narrative else None
+    doc, digest = studio.build_report_html(a, (STORE.tenants.get(a["tenant_id"]) or {}).get("name") or a["tenant_id"], ucs, gaps, mat, road, story, p.sub)
+    audit(p, "report.diagnostic", f"{aid}/{digest[:12]}")
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", a["ai_system_name"])[:60] or "assessment"
+    return Response(doc, media_type="text/html; charset=utf-8", headers={
+        "Content-Disposition": f'attachment; filename="diagnostic_{name}_{status}.html"', "X-Report-Status": status, "X-Content-Digest": digest})
+
+
+# ---------- user and access administration (CloudSeals admins) ----------
+STAFF_EMAIL_DOMAINS = [d.strip().lower() for d in re.split(r"[,;]", os.environ.get("TAAD_STAFF_EMAIL_DOMAINS", "")) if d.strip()]
+
+
+class UserInvite(BaseModel):
+    email: str = Field(min_length=3, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    roles: list[str] = Field(min_length=1, max_length=6)
+    tenant_id: Optional[str] = None
+
+
+class UserRoles(BaseModel):
+    roles: list[str] = Field(min_length=1, max_length=6)
+
+
+def _check_membership(roles: list[str], tenant_id: Optional[str], email: Optional[str] = None) -> list[str]:
+    from .security import ALL_ROLES
+    roles = sorted(set(roles))
+    if any(r not in ALL_ROLES for r in roles):
+        raise err(422, "invalid_role", "Unknown role")
+    staff = [r for r in roles if r in CLOUDSEALS_ROLES]
+    if staff and (tenant_id or len(staff) != len(roles)):
+        raise err(422, "invalid_membership", "CloudSeals roles cannot be combined with a customer workspace or customer roles")
+    if not staff and (not tenant_id or tenant_id not in STORE.tenants):
+        raise err(422, "invalid_tenant", "Customer users need an existing customer workspace")
+    if staff and email and STAFF_EMAIL_DOMAINS and email.rsplit("@", 1)[-1] not in STAFF_EMAIL_DOMAINS:
+        raise err(422, "email_domain_not_allowed", f"CloudSeals roles are limited to: {', '.join(STAFF_EMAIL_DOMAINS)}")
+    return roles
+
+
+def _admin_count() -> int:
+    return sum("cloudseals_admin" in u.get("roles", []) for u in STORE.users.values())
+
+
+@app.get("/v1/admin/users")
+def list_users(p: Principal = Depends(principal)):
+    require(p, "cloudseals_admin")
+    members = [{"sub": sub, "email": u.get("email"), "roles": u["roles"], "tenant_id": u.get("tenant_id"),
+                "tenant_name": (STORE.tenants.get(u.get("tenant_id") or "") or {}).get("name"), "is_self": sub == p.sub}
+               for sub, u in sorted(STORE.users.items(), key=lambda kv: (kv[1].get("email") or kv[0]))]
+    pending = [{"email": e, **v, "tenant_name": (STORE.tenants.get(v["tenant_id"] or "") or {}).get("name")} for e, v in sorted(STORE.pending_users.items())]
+    return {"items": members, "pending": pending, "staff_email_domains": STAFF_EMAIL_DOMAINS,
+            "sign_in": "google" if AUTH_PROVIDER == "google" else "other"}
+
+
+@app.post("/v1/admin/users", status_code=201)
+def invite_user(body: UserInvite, p: Principal = Depends(principal)):
+    require(p, "cloudseals_admin")
+    if AUTH_PROVIDER != "google":
+        raise err(409, "not_supported", "Pre-registering by email needs Google sign-in; use workspace invitations instead")
+    email = body.email.strip().lower()
+    roles = _check_membership(body.roles, body.tenant_id, email)
+    with STORE.lock:
+        if any(u.get("email") == email for u in STORE.users.values()):
+            raise err(409, "conflict", "This person already has access")
+        STORE.pending_users[email] = {"roles": roles, "tenant_id": body.tenant_id, "invited_by": p.sub, "at": time.time()}
+        audit(p, "user.invited", email)
+    return {"email": email, "roles": roles, "tenant_id": body.tenant_id, "status": "pending_first_sign_in"}
+
+
+@app.delete("/v1/admin/users/pending/{email}")
+def cancel_invite(email: str, p: Principal = Depends(principal)):
+    require(p, "cloudseals_admin")
+    with STORE.lock:
+        if STORE.pending_users.pop(email.lower(), None) is None:
+            raise err(404, "not_found", "No pending invitation for this email")
+        audit(p, "user.invite_cancelled", email.lower())
+    return {"cancelled": email.lower()}
+
+
+@app.patch("/v1/admin/users/{sub}")
+def change_user_roles(sub: str, body: UserRoles, p: Principal = Depends(principal)):
+    require(p, "cloudseals_admin")
+    with STORE.lock:
+        u = STORE.users.get(sub)
+        if not u:
+            raise err(404, "not_found", "User not found")
+        roles = _check_membership(body.roles, u.get("tenant_id"), u.get("email"))
+        if "cloudseals_admin" in u["roles"] and "cloudseals_admin" not in roles and (sub == p.sub or _admin_count() <= 1):
+            raise err(409, "last_admin", "You cannot remove the admin role from yourself or from the last admin")
+        u["roles"] = roles
+        audit(p, "user.roles_changed", sub)
+    return {"sub": sub, "roles": roles}
+
+
+@app.delete("/v1/admin/users/{sub}")
+def remove_user(sub: str, p: Principal = Depends(principal)):
+    require(p, "cloudseals_admin")
+    with STORE.lock:
+        u = STORE.users.get(sub)
+        if not u:
+            raise err(404, "not_found", "User not found")
+        if sub == p.sub or ("cloudseals_admin" in u["roles"] and _admin_count() <= 1):
+            raise err(409, "last_admin", "You cannot remove yourself or the last admin")
+        del STORE.users[sub]
+        audit(p, "user.removed", sub)
+    return {"removed": sub}
+
+
+# ---------- engagement cases (CloudSeals staff) ----------
+CASE_STATUSES = ("draft", "intake", "inventory", "gap", "review", "report", "delivered", "archived")
+CASE_TIERS = ("tier_1", "tier_2", "tier_3")
+CASE_STAFF = ("cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer")
+
+
+class CaseCreate(BaseModel):
+    title: str = Field(min_length=3, max_length=200)
+    customer_name: str = Field(min_length=2, max_length=200)
+    tenant_id: Optional[str] = None
+    industry: str = Field(default="other", max_length=40)
+    region: str = Field(default="UK", max_length=40)
+    frameworks_in_scope: list[str] = Field(default_factory=list, max_length=5)
+    tier: Literal["tier_1", "tier_2", "tier_3"] = "tier_1"
+    lead_architect: Optional[str] = None
+    architects: list[str] = Field(default_factory=list, max_length=20)
+    target_delivery_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    notes: str = Field(default="", max_length=4000)
+
+
+class CasePatch(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=3, max_length=200)
+    customer_name: Optional[str] = Field(default=None, min_length=2, max_length=200)
+    tenant_id: Optional[str] = None
+    industry: Optional[str] = Field(default=None, max_length=40)
+    region: Optional[str] = Field(default=None, max_length=40)
+    frameworks_in_scope: Optional[list[str]] = Field(default=None, max_length=5)
+    tier: Optional[Literal["tier_1", "tier_2", "tier_3"]] = None
+    lead_architect: Optional[str] = None
+    architects: Optional[list[str]] = Field(default=None, max_length=20)
+    target_delivery_date: Optional[str] = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    notes: Optional[str] = Field(default=None, max_length=4000)
+
+
+class CaseStatusChange(BaseModel):
+    status: Literal["draft", "intake", "inventory", "gap", "review", "report", "delivered", "archived"]
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class CaseLink(BaseModel):
+    assessment_id: str
+
+
+def _staff_member(sub: str) -> bool:
+    u = STORE.users.get(sub)
+    return bool(u and set(u["roles"]) & set(CASE_STAFF))
+
+
+def _case_for(p: Principal, cid: str, *, write: bool = False) -> dict:
+    """Admins see every case; other staff only cases they are assigned to. Unknown and unassigned look the same (404)."""
+    require(p, *CASE_STAFF)
+    c = STORE.cases.get(cid)
+    admin = "cloudseals_admin" in p.roles
+    if not c or not (admin or p.sub in c["architects"]):
+        raise err(404, "not_found", "Case not found")
+    if write and not (admin or p.sub == c["lead_architect"]):
+        raise err(403, "forbidden", "Only the lead architect or an admin can change this case")
+    return c
+
+
+def _case_people(c: dict) -> list[dict]:
+    return [{"sub": s, "email": (STORE.users.get(s) or {}).get("email"), "is_lead": s == c["lead_architect"]} for s in c["architects"]]
+
+
+def _case_progress(c: dict) -> dict:
+    """What the linked assessments have achieved so far (reviewer-validated work only)."""
+    uc = gaps = road = 0
+    mat = None
+    risk_rank = {"prohibited": 3, "high_risk": 2, "limited_risk": 1, "minimal_risk": 0}
+    risk = None
+    report = "none"
+    for aid in c["assessment_ids"]:
+        inv = STORE.inventory.get(aid) or {}
+        ucs = [u for u in inv.get("use_cases", []) if u["status"] == "VALIDATED"]
+        uc += len(ucs)
+        gaps += sum(g["status"] == "VALIDATED" for g in inv.get("gaps", []))
+        road += sum(i["status"] == "VALIDATED" for i in inv.get("roadmap", []))
+        m = inv.get("maturity")
+        if m and m["status"] == "VALIDATED":
+            mat = m["overall_score"] if mat is None else round((mat + m["overall_score"]) / 2, 2)
+        for u in ucs:
+            if risk is None or risk_rank[u["risk_tier"]] > risk_rank[risk]:
+                risk = u["risk_tier"]
+        st, _ = studio.report_status(ucs, m if m and m["status"] == "VALIDATED" else None, [i for i in inv.get("roadmap", []) if i["status"] == "VALIDATED"])
+        if st == "FINAL":
+            report = "final"
+        elif ucs and report == "none":
+            report = "draft"
+    return {"validated_use_cases": uc, "validated_gaps": gaps, "validated_roadmap_items": road, "maturity_score": mat, "risk_level": risk, "report": report}
+
+
+def _case_view(c: dict, detail: bool = False) -> dict:
+    out = {**{k: c[k] for k in ("case_id", "title", "customer_name", "tenant_id", "industry", "region", "frameworks_in_scope", "tier", "status",
+                                "target_delivery_date", "created_at", "updated_at", "lead_architect")},
+           "assessment_ids": c["assessment_ids"], "progress": _case_progress(c), "architects": _case_people(c)}
+    if detail:
+        out["notes"] = c["notes"]
+        out["status_history"] = c["status_history"]
+        out["assessments"] = [{"assessment_id": a["assessment_id"], "ai_system_name": a["ai_system_name"], "status": a["status"], "industry": a["industry"]}
+                              for a in (STORE.assessments.get(x) for x in c["assessment_ids"]) if a]
+    return out
+
+
+def _validate_case_fields(frameworks: Optional[list[str]], architects: Optional[list[str]], lead: Optional[str], tenant_id: Optional[str]) -> None:
+    if frameworks is not None and any(f not in use_cases.FRAMEWORKS for f in frameworks):
+        raise err(422, "unknown_framework", "Unknown framework")
+    if architects is not None and any(not _staff_member(a) for a in architects):
+        raise err(422, "unknown_architect", "Architects must be CloudSeals staff")
+    if lead and not _staff_member(lead):
+        raise err(422, "unknown_architect", "The lead architect must be CloudSeals staff")
+    if tenant_id and tenant_id not in STORE.tenants:
+        raise err(422, "invalid_tenant", "Unknown customer workspace")
+
+
+@app.get("/v1/staff")
+def list_staff(p: Principal = Depends(principal)):
+    require(p, *CASE_STAFF)
+    members = sorted(STORE.users.items(), key=lambda kv: kv[1].get("email") or kv[0])
+    return {"items": [{"sub": s, "email": u.get("email"), "roles": u["roles"]} for s, u in members if set(u["roles"]) & set(CASE_STAFF)]}
+
+
+@app.post("/v1/cases", status_code=201)
+def create_case(body: CaseCreate, p: Principal = Depends(principal)):
+    require(p, "cloudseals_admin", "cloudseals_assessor")
+    lead = body.lead_architect or p.sub
+    architects = sorted(set(body.architects) | {lead, p.sub})
+    _validate_case_fields(body.frameworks_in_scope, architects, lead, body.tenant_id)
+    cid = "case_" + uuid.uuid4().hex[:12]
+    now = time.time()
+    with STORE.lock:
+        STORE.cases[cid] = {"case_id": cid, "title": body.title.strip(), "customer_name": body.customer_name.strip(), "tenant_id": body.tenant_id,
+                            "industry": body.industry, "region": body.region, "frameworks_in_scope": body.frameworks_in_scope, "tier": body.tier,
+                            "lead_architect": lead, "architects": architects, "status": "draft", "target_delivery_date": body.target_delivery_date,
+                            "notes": body.notes, "assessment_ids": [],
+                            "status_history": [{"status": "draft", "by": p.sub, "at": now, "reason": "Case created"}],
+                            "created_by": p.sub, "created_at": now, "updated_at": now}
+        audit(p, "case.created", cid)
+    return _case_view(STORE.cases[cid], detail=True)
+
+
+@app.get("/v1/cases")
+def list_cases(status: Optional[str] = None, q: Optional[str] = Query(default=None, max_length=100), p: Principal = Depends(principal)):
+    require(p, *CASE_STAFF)
+    admin = "cloudseals_admin" in p.roles
+    items = [c for c in STORE.cases.values() if admin or p.sub in c["architects"]]
+    if status:
+        items = [c for c in items if c["status"] == status]
+    if q:
+        needle = q.casefold()
+        items = [c for c in items if needle in c["title"].casefold() or needle in c["customer_name"].casefold()]
+    items.sort(key=lambda c: c["created_at"], reverse=True)
+    return {"items": [_case_view(c) for c in items], "total": len(items)}
+
+
+@app.get("/v1/cases/{cid}")
+def get_case(cid: str, p: Principal = Depends(principal)):
+    return _case_view(_case_for(p, cid), detail=True)
+
+
+@app.patch("/v1/cases/{cid}")
+def patch_case(cid: str, body: CasePatch, p: Principal = Depends(principal)):
+    c = _case_for(p, cid, write=True)
+    changes = body.model_dump(exclude_unset=True)
+    architects = changes.get("architects")
+    lead = changes.get("lead_architect")
+    if lead or architects is not None:
+        architects = sorted(set(architects if architects is not None else c["architects"]) | {lead or c["lead_architect"]})
+        changes["architects"] = architects
+    _validate_case_fields(changes.get("frameworks_in_scope"), architects, lead, changes.get("tenant_id"))
+    if lead and "cloudseals_admin" not in p.roles and p.sub != lead and lead != c["lead_architect"] and p.sub != c["lead_architect"]:
+        raise err(403, "forbidden", "Only an admin or the current lead can hand the case over")
+    with STORE.lock:
+        c.update(changes)
+        c["updated_at"] = time.time()
+        audit(p, "case.updated", cid)
+    return _case_view(c, detail=True)
+
+
+@app.post("/v1/cases/{cid}/status")
+def change_case_status(cid: str, body: CaseStatusChange, p: Principal = Depends(principal)):
+    c = _case_for(p, cid, write=True)
+    if body.status == "delivered":
+        finals = [a for a in c["assessment_ids"] if _case_progress({"assessment_ids": [a]})["report"] == "final"]
+        if not finals:
+            raise err(409, "report_not_final", "A case can be delivered only when a linked assessment has a FINAL diagnostic report")
+    with STORE.lock:
+        c["status"] = body.status
+        c["status_history"].append({"status": body.status, "by": p.sub, "at": time.time(), "reason": body.reason})
+        c["updated_at"] = time.time()
+        audit(p, f"case.status.{body.status}", cid)
+    return _case_view(c, detail=True)
+
+
+@app.post("/v1/cases/{cid}/assessments")
+def link_case_assessment(cid: str, body: CaseLink, p: Principal = Depends(principal)):
+    c = _case_for(p, cid, write=True)
+    a = STORE.assessments.get(body.assessment_id)
+    if not a or (c["tenant_id"] and a["tenant_id"] != c["tenant_id"]):
+        raise err(422, "invalid_assessment", "The assessment must exist and belong to this case's customer workspace")
+    if any(body.assessment_id in x["assessment_ids"] for x in STORE.cases.values() if x["case_id"] != cid):
+        raise err(409, "conflict", "This assessment is already linked to another case")
+    with STORE.lock:
+        if body.assessment_id not in c["assessment_ids"]:
+            c["assessment_ids"].append(body.assessment_id)
+        if not c["tenant_id"]:
+            c["tenant_id"] = a["tenant_id"]
+        c["updated_at"] = time.time()
+        audit(p, "case.assessment_linked", f"{cid}/{body.assessment_id}")
+    return _case_view(c, detail=True)
+
+
+@app.delete("/v1/cases/{cid}/assessments/{aid}")
+def unlink_case_assessment(cid: str, aid: str, p: Principal = Depends(principal)):
+    c = _case_for(p, cid, write=True)
+    with STORE.lock:
+        if aid not in c["assessment_ids"]:
+            raise err(404, "not_found", "Assessment is not linked to this case")
+        c["assessment_ids"].remove(aid)
+        c["updated_at"] = time.time()
+        audit(p, "case.assessment_unlinked", f"{cid}/{aid}")
+    return _case_view(c, detail=True)
+
+
+@app.get("/v1/cases/{cid}/audit")
+def case_audit_feed(cid: str, p: Principal = Depends(principal)):
+    c = _case_for(p, cid)
+    keys = [cid, *c["assessment_ids"]]
+    rows = [a for a in STORE.audit if any(k in str(a.get("ref", "")) for k in keys)]
+    return {"items": [{"at": a["at"], "sub": a["sub"], "email": (STORE.users.get(a["sub"]) or {}).get("email"), "action": a["action"], "ref": a["ref"]}
+                      for a in reversed(rows[-300:])]}
+
+
+@app.get("/v1/admin/workspaces")
+def list_workspaces(p: Principal = Depends(principal)):
+    require(p, *CASE_STAFF, *AUDIT_ROLES)
+    out = []
+    for t in STORE.tenants.values():
+        tid = t["tenant_id"]
+        runs = [r for r in STORE.workflow_runs.values() if r["tenant_id"] == tid]
+        out.append({"tenant_id": tid, "name": t.get("name") or tid, "industry": t.get("industry"),
+                    "users": sum(u.get("tenant_id") == tid for u in STORE.users.values()),
+                    "assessments": sum(a["tenant_id"] == tid for a in STORE.assessments.values()),
+                    "runs": len(runs), "pending_approvals": sum(r["status"] == "approval_required" for r in runs)})
+    return {"items": sorted(out, key=lambda w: w["name"].casefold())}
+
+
+@app.get("/v1/admin/workspaces/{tid}")
+def get_workspace(tid: str, p: Principal = Depends(principal)):
+    """Read-only view of a customer workspace for CloudSeals staff. Nothing here lets staff act as the customer."""
+    require(p, *CASE_STAFF, *AUDIT_ROLES)
+    t = STORE.tenants.get(tid)
+    if not t:
+        raise err(404, "not_found", "Workspace not found")
+    runs = sorted((r for r in STORE.workflow_runs.values() if r["tenant_id"] == tid), key=lambda r: r.get("created_at", 0), reverse=True)
+    return {"tenant": {k: t.get(k) for k in ("tenant_id", "name", "industry", "residency_profile")},
+            "members": [{"sub": s, "email": u.get("email"), "roles": u["roles"]} for s, u in STORE.users.items() if u.get("tenant_id") == tid],
+            "assessments": [{k: a[k] for k in ("assessment_id", "ai_system_name", "status", "industry")}
+                            for a in STORE.assessments.values() if a["tenant_id"] == tid],
+            "runs": [{"run_id": r["run_id"], "receipt_id": r.get("receipt_id"), "amount_minor": r.get("amount_minor"), "currency": r.get("currency"),
+                      "status": r["status"], "created_by": r.get("created_by"), "created_at": r.get("created_at")} for r in runs[:25]],
+            "pending_approvals": sum(r["status"] == "approval_required" for r in runs)}
 
 
 @app.get("/v1/admin/metrics")
@@ -1301,10 +1772,103 @@ def review_queue(p: Principal = Depends(principal)):
                       for r in STORE.reports.values() if r["status"] in ("draft", "clarification_requested")]}
 
 
+AUDIT_ROLES = ("cloudseals_admin", "cloudseals_platform_ops", "auditor_readonly")
+STARTED_AT = time.time()
+
+
+def _audit_rows(q: Optional[str], action: Optional[str], actor: Optional[str], since: Optional[float], until: Optional[float]) -> list[dict]:
+    rows = []
+    needle = (q or "").casefold()
+    who = (actor or "").casefold()
+    for a in reversed(STORE.audit):
+        email = (STORE.users.get(a.get("sub", "")) or {}).get("email") or ""
+        if action and not a["action"].startswith(action):
+            continue
+        if who and who not in a.get("sub", "").casefold() and who not in email.casefold():
+            continue
+        if since is not None and a["at"] < since or until is not None and a["at"] > until:
+            continue
+        if needle and needle not in f"{a['action']} {a.get('ref', '')} {a.get('sub', '')} {email}".casefold():
+            continue
+        rows.append({**a, "email": email or None})
+    return rows
+
+
 @app.get("/v1/admin/activity")
-def activity(limit: int = 100, p: Principal = Depends(principal)):
-    require(p, "cloudseals_admin", "cloudseals_platform_ops", "auditor_readonly")
-    return {"items": STORE.audit[-min(max(limit, 1), 500):][::-1]}
+def activity(limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0), q: Optional[str] = Query(default=None, max_length=100),
+             action: Optional[str] = Query(default=None, max_length=60), actor: Optional[str] = Query(default=None, max_length=120),
+             since: Optional[float] = None, until: Optional[float] = None, p: Principal = Depends(principal)):
+    require(p, *AUDIT_ROLES)
+    rows = _audit_rows(q, action, actor, since, until)
+    categories: dict[str, int] = {}
+    for a in rows:
+        key = a["action"].split(".", 1)[0]
+        categories[key] = categories.get(key, 0) + 1
+    return {"items": rows[offset:offset + limit], "total": len(rows), "offset": offset, "limit": limit,
+            "categories": dict(sorted(categories.items(), key=lambda kv: -kv[1]))}
+
+
+def _csv_cell(v: Any) -> str:
+    t = str(v if v is not None else "")
+    if t[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        t = "'" + t                      # spreadsheet formula injection: audit text includes user-chosen names
+    return '"' + t.replace('"', '""') + '"'
+
+
+@app.get("/v1/admin/activity/export")
+def activity_export(q: Optional[str] = Query(default=None, max_length=100), action: Optional[str] = Query(default=None, max_length=60),
+                    actor: Optional[str] = Query(default=None, max_length=120), since: Optional[float] = None, until: Optional[float] = None,
+                    p: Principal = Depends(principal)):
+    require(p, *AUDIT_ROLES)
+    rows = _audit_rows(q, action, actor, since, until)[:20000]
+    lines = ["when_utc,actor,email,tenant,action,reference"] + [
+        ",".join(_csv_cell(x) for x in (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(a["at"])), a.get("sub"), a.get("email"),
+                                        a.get("tenant_id"), a["action"], a.get("ref")))
+        for a in rows]
+    audit(p, "audit.exported", f"{len(rows)} rows")
+    return Response("\n".join(lines) + "\n", media_type="text/csv; charset=utf-8", headers={"Content-Disposition": 'attachment; filename="activity-log.csv"'})
+
+
+@app.get("/v1/admin/health")
+def service_health(probe: bool = False, p: Principal = Depends(principal)):
+    """Component status for operators. `probe=true` makes tiny live calls (model, KMS) and reports their latency."""
+    require(p, *AUDIT_ROLES)
+    if probe:
+        agent_throttle(p, "service-health")
+
+    def timed(fn) -> dict:
+        t = time.perf_counter()
+        try:
+            fn()
+            return {"ok": True, "ms": round((time.perf_counter() - t) * 1000)}
+        except Exception as exc:
+            return {"ok": False, "ms": round((time.perf_counter() - t) * 1000), "error": f"{type(exc).__name__}: {str(exc)[:140]}"}
+
+    provider = llm.provider()
+    kms_key = os.environ.get("TAAD_KMS_SIGNING_KEY_VERSION", "")
+    model_id = os.environ.get("TAAD_VERTEX_MODEL", llm.DEFAULT_VERTEX_MODEL) if provider == "vertex" else os.environ.get("TRUSTOPS_AGENT_MODEL_ID")
+    model = {"configured": bool(provider), "provider": provider or None, "model_id": model_id if provider else None}
+    if probe and SWASKA_CLIENT is not None:
+        model["probe"] = timed(lambda: SWASKA_CLIENT.complete("Reply with the JSON object {\"ok\": true}.", "ping", max_tokens=20))
+    signing = {"configured": bool(kms_key), "key_version": kms_key or None}
+    if probe and kms_key:
+        from . import kms as kms_mod
+        signer = kms_mod.from_env()
+        signing["probe"] = timed(lambda: signer.sign(kms_mod.digest_of("health-probe")))
+    day = time.time() - 86400
+    agent_calls: dict[str, int] = {}
+    for a in STORE.audit:
+        if a["at"] >= day and a["action"].startswith("agent."):
+            agent_calls[a["action"]] = agent_calls.get(a["action"], 0) + 1
+    state_backend = "gcs" if os.environ.get("TAAD_STATE_GCS_URI") else "sql" if persist.enabled() else "memory"
+    return {"service": {"revision": os.environ.get("K_REVISION"), "environment": ENV, "uptime_seconds": round(time.time() - STARTED_AT),
+                        "auth": AUTH_PROVIDER or AUTH_MODE},
+            "state": {"backend": state_backend, "durable": state_backend != "memory", **persist.STATUS},
+            "evidence_store": {"backend": os.environ.get("TAAD_OBJECT_BACKEND") or "local-disk"},
+            "model": model, "evidence_signing": signing,
+            "runtime": {"mode": "sandbox" if runtime_enabled() else "unavailable"},
+            "agents": {"calls_last_24h": agent_calls, "advisory_agents": len(taad_agents.AGENTS)},
+            "counts": {"users": len(STORE.users), "assessments": len(STORE.assessments), "cases": len(STORE.cases), "audit_events": len(STORE.audit)}}
 
 
 # ---------- portal (static, same origin) ----------
@@ -1338,6 +1902,18 @@ def portal_config():
 
 
 GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+_CALLBACK_PARAMS = ("code", "state", "scope", "authuser", "prompt", "hd", "error", "error_description")
+
+
+@app.get("/api/auth/callback/google", include_in_schema=False)
+def google_callback_forward(request: Request):
+    """The OAuth client already lists this path for the domain (it was the previous UI's callback). Forward only the
+    expected OAuth parameters to the portal, which completes the PKCE exchange in the browser."""
+    if AUTH_PROVIDER != "google":
+        raise err(404, "not_found", "Not available")
+    from urllib.parse import urlencode
+    q = {k: v for k, v in request.query_params.items() if k in _CALLBACK_PARAMS}
+    return Response(status_code=302, headers={"Location": "/portal/?" + urlencode(q)})
 GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 
@@ -1366,6 +1942,11 @@ async def google_token_exchange(request: Request):
     if not body.get("id_token"):
         raise err(502, "token_exchange_failed", "Sign-in could not be completed")
     return {"access_token": body["id_token"], "token_type": "Bearer", "expires_in": min(int(body.get("expires_in", 3600)), 3600)}
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return Response(status_code=302, headers={"Location": "/portal/"})
 
 
 if _portal.is_dir():

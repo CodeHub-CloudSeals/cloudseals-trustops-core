@@ -17,6 +17,7 @@ AUTH_PROVIDER="${AUTH_PROVIDER:-google}"
 SERVICE="${SERVICE:-taad-api}"
 REPO="${REPO:-taad}"
 LLM_PROVIDER="${LLM_PROVIDER-vertex}"
+STAFF_EMAIL_DOMAINS="${STAFF_EMAIL_DOMAINS-cloudseals.co.uk;cloudseals.com}"   # email domains allowed to hold CloudSeals roles (";" separated)
 VERTEX_MODEL="${VERTEX_MODEL:-gemini-2.5-flash}"
 VERTEX_LOCATION="${VERTEX_LOCATION:-$REGION}"
 KMS_KEYRING="${KMS_KEYRING:-taad}"
@@ -37,7 +38,11 @@ cd "$(dirname "$0")/../.."
 gcloud config set project "$PROJECT_ID" >/dev/null
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 SERVICE_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
-REDIRECT_URI="${SERVICE_URL}/portal/"
+# PUBLIC_URL=https://trustops.example.com serves the portal (and the OAuth redirect) from your own domain once it is mapped to the service.
+PUBLIC_URL="${PUBLIC_URL:-$SERVICE_URL}"
+# REDIRECT_PATH=/api/auth/callback/google reuses a callback path already registered on the OAuth client (the previous UI used it).
+REDIRECT_PATH="${REDIRECT_PATH:-/portal/}"
+REDIRECT_URI="${PUBLIC_URL%/}${REDIRECT_PATH}"
 echo ">> Add this authorised redirect URI to your OAuth client / identity provider: ${REDIRECT_URI}"
 
 echo ">> Enabling APIs"
@@ -92,7 +97,7 @@ gcloud storage buckets add-iam-policy-binding "gs://${BUILD_BUCKET}" --member "s
 gcloud iam service-accounts add-iam-policy-binding "$RUN_SA_EMAIL" --member "serviceAccount:${BUILD_SA_EMAIL}" --role roles/iam.serviceAccountUser >/dev/null
 
 echo ">> Cloud Build: test, build, push, deploy, smoke test"
-SUBS="_REGION=${REGION},_REPO=${REPO},_SERVICE=${SERVICE},_ENV=${APP_ENV},_RUNTIME_SA=${RUN_SA},_BUCKET=${BUCKET},_STATE_BUCKET=${STATE_BUCKET},_AUTH_PROVIDER=${AUTH_PROVIDER},_PORTAL_REDIRECT_URI=${REDIRECT_URI},_LLM_PROVIDER=${LLM_PROVIDER},_VERTEX_MODEL=${VERTEX_MODEL},_VERTEX_LOCATION=${VERTEX_LOCATION},_KMS_KEY_VERSION=${KMS_KEY_VERSION},_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},_GOOGLE_SECRET=${GOOGLE_SECRET},_FIRST_ADMIN_EMAIL=${FIRST_ADMIN_EMAIL}"
+SUBS="_REGION=${REGION},_REPO=${REPO},_SERVICE=${SERVICE},_ENV=${APP_ENV},_RUNTIME_SA=${RUN_SA},_BUCKET=${BUCKET},_STATE_BUCKET=${STATE_BUCKET},_AUTH_PROVIDER=${AUTH_PROVIDER},_PORTAL_REDIRECT_URI=${REDIRECT_URI},_LLM_PROVIDER=${LLM_PROVIDER},_VERTEX_MODEL=${VERTEX_MODEL},_VERTEX_LOCATION=${VERTEX_LOCATION},_KMS_KEY_VERSION=${KMS_KEY_VERSION},_GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID},_GOOGLE_SECRET=${GOOGLE_SECRET},_FIRST_ADMIN_EMAIL=${FIRST_ADMIN_EMAIL},_STAFF_EMAIL_DOMAINS=${STAFF_EMAIL_DOMAINS}"
 if [ "$AUTH_PROVIDER" != "google" ]; then
   SUBS="${SUBS},_OIDC_ISSUER=${OIDC_ISSUER},_OIDC_JWKS_URL=${OIDC_JWKS_URL},_OIDC_AUDIENCE=${OIDC_AUDIENCE},_PORTAL_AUTHORIZE_URL=${OIDC_AUTHORIZE_URL},_PORTAL_TOKEN_URL=${OIDC_TOKEN_URL},_PORTAL_LOGOUT_URL=${OIDC_LOGOUT_URL},_PORTAL_CLIENT_ID=${OIDC_CLIENT_ID}"
 fi
@@ -102,4 +107,4 @@ gcloud builds submit . --config cloudbuild.yaml \
   --substitutions "$SUBS"
 
 echo
-echo "Deployed: ${SERVICE_URL}/portal/"
+echo "Deployed: ${PUBLIC_URL%/}/portal/   (Cloud Run URL: ${SERVICE_URL}/portal/)"

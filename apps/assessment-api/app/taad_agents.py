@@ -20,6 +20,7 @@ AGENTS = {a["agent_id"]: {**a, "prohibited_capabilities": CATALOG["common_prohib
 CLAIM = re.compile(r"\b(legally compliant|compliant with|is compliant|are compliant|verified|certified)\b", re.I)
 QLINE = re.compile(r"^\s*(Q-[A-Z]+-\d{3})\s*[:=]\s*(.+?)\s*$", re.M)
 INVENTORY, GAP = "trustops.inventory_agent", "trustops.gap_analysis_agent"
+MATURITY, ROADMAP, REPORT = "trustops.maturity_scorer", "trustops.roadmap_agent", "trustops.report_writer"
 EXTRACTION, FINDINGS, DRAFTER, APPROVAL = "cloudseals.swaska.evidence_extractor", "cloudseals.swaska.findings_summarizer", \
     "cloudseals.swaska.poc_drafter", "trustops.approval_summarizer"
 

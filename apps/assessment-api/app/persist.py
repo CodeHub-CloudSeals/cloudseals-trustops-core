@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Any, Optional
 
 from sqlalchemy import Column, Integer, MetaData, Table, Text, create_engine, select, update
@@ -16,7 +17,7 @@ from sqlalchemy.engine import URL, Engine
 from .store import Store
 
 TUPLE_KEYED = {"answers", "idempotency"}
-FIELDS = ["users", "tenants", "assessments", "answers", "revisions", "evidence", "findings", "reports", "blueprints", "inventory",
+FIELDS = ["users", "pending_users", "tenants", "assessments", "answers", "revisions", "evidence", "findings", "reports", "blueprints", "cases", "inventory",
           "idempotency", "registrations", "events", "audit", "invitations", "assignments", "engagements", "rate", "outbox",
           "not_assessed", "admin_bootstrap", "workflow_runs", "action_tokens", "runtime_evidence", "mock_sap"]
 META = MetaData()
@@ -28,6 +29,7 @@ class PersistConflict(RuntimeError):
     """Another writer changed the state row; local state was reloaded and the request should be retried."""
 
 
+STATUS: dict[str, Any] = {"last_save_at": None, "last_save_error": None, "saves": 0}   # surfaced by the service-health page
 _engines: dict[str, Engine] = {}
 _versions: dict[str, int] = {}
 
@@ -142,6 +144,18 @@ def load(store: Store, target: Optional[str | URL] = None) -> bool:
 
 
 def save(store: Store, target: Optional[str | URL] = None) -> None:
+    try:
+        _save(store, target)
+    except PersistConflict:
+        raise
+    except Exception as exc:
+        STATUS["last_save_error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+        raise
+    else:
+        STATUS.update(last_save_at=time.time(), last_save_error=None, saves=STATUS["saves"] + 1)
+
+
+def _save(store: Store, target: Optional[str | URL] = None) -> None:
     target = target or url_from_env(os.environ.get("TAAD_DB"))
     if target is None:
         return
