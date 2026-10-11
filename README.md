@@ -79,6 +79,18 @@ Every agent works **without a model** where that makes sense (deterministic fall
 * The report contains only validated items and is marked **DRAFT** until use cases, maturity and roadmap are all validated.
 * Customers see their own use cases; gaps, maturity, roadmap and the report stay with CloudSeals until reviewed.
 
+### Delivering diagnostic results to a customer
+
+In **Use cases / Diagnostic studio**, validate the evidence-backed inventory, gaps, maturity and roadmap. Download the report preview for a final check, enter a final review reason, then select **Publish report to customer**. Only a CloudSeals reviewer or admin can publish. A ready `FINAL` preview does not publish automatically.
+
+Publication is blocked when required material is missing, a reviewed item cites evidence or another item that is no longer valid, or a critical/high gap lacks a validated roadmap action. If the material changes after the reviewer loaded the preview, reload and check it again before publishing.
+
+The customer's **Use cases** page then shows **Your report and improvement roadmap**, with the released gaps, maturity summary, actions and an HTML download. Published versions keep their reviewed inputs and exact HTML; later edits do not change a customer's released report. Repeated publication of the same material creates no duplicate version. New reviewed material can be published as the next version, and old versions remain downloadable. Published reports omit the optional AI narrative.
+
+A staff case can be marked **Delivered** only after a linked assessment has a published diagnostic report. Questionnaire reports retain their separate review/publication flow.
+
+API: `POST /v1/assessments/{aid}/diagnostic-report/publish` takes `reason`, the `source_digest` returned by the staff report preview, and `Idempotency-Key`. `GET /v1/assessments/{aid}/diagnostic-report?report_id=<id>` downloads a released version; a customer cannot access an unpublished report or another tenant's version. Releases live inside the existing persisted inventory state.
+
 ## Safety rules built into the code
 
 These are enforced in code and covered by tests, not just stated in prompts.
@@ -157,7 +169,7 @@ Without a model the document-reading agents report "model required". To see them
 ## Tests
 
 ```bash
-make test                       # 170 unit/API/security/contract tests (about 6 s)
+make test                       # 173 unit/API/security/contract tests
 make browser                    # 63 Playwright tests against a real server (about 50 s)
 make lint typecheck             # ruff, mypy
 DEPLOYED_URL=https://trustops.cloudseals.com \

@@ -1,5 +1,14 @@
 # TAAD project completion status
 
+## Customer diagnostic delivery milestone (2026-10-11)
+
+- Added explicit reviewer/admin publication of a diagnostic report and improvement roadmap to the customer's portal, with a required final review reason and a preview digest check.
+- Released versions preserve the reviewed material and exact HTML in the existing durable inventory state. Later review changes affect only working material; customers can download published versions. Duplicate publication is idempotent.
+- Publication checks clean source evidence, reviewed references/dependencies and roadmap coverage for critical/high gaps. A staff case cannot be marked delivered until a linked report is published.
+- Verified locally: 173 backend/security/contract tests, lint, existing package type checks and registry validation. A synthetic sample completed the pipeline with the test-only scripted model; it does not demonstrate live Gemini analysis or a real customer sign-off.
+- A fresh synthetic Vertex probe on 2026-10-11 still returned HTTP 403, `Lightning dunning decision is deny`. Cloud billing must be restored by the account owner before real model-backed document analysis can be accepted. No billing/payment settings were changed.
+
+
 **Status: live at https://trustops.cloudseals.com (GCP `trustops-uat`, Cloud Run service `trustops-ui`, europe-west1) in the DEV environment profile. Not production-ready: Vertex AI is blocked by a billing hold, single instance, sandbox workflow runtime only, frameworks pending legal review.** The customer-call rehearsal and local engineering foundation are ready. A six-agent deterministic LedgerSight sandbox runtime is now implemented, but AWS DEV deployment, hosted UAT, and the production release gates in `TAAD_END_GOAL.md` remain open.
 
 ## Completed in this workspace

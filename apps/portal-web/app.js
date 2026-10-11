@@ -1473,11 +1473,51 @@ function overlayPanel(aid, inv, canReview, validatedUc, redraw) {
 
 async function reportPanel(aid) {
   const st = await api(`/v1/assessments/${aid}/diagnostic-report?format=json`);
-  const dlBtn = (label, qs, cls = "") => el("button", { class: cls, onclick: safe(async (e) => { e.currentTarget.disabled = true; await dl(`/v1/assessments/${aid}/diagnostic-report${qs}`, `diagnostic-report-${st.status}.html`); e.currentTarget.disabled = false; }) }, label);
+  const canPublish = state.me.roles.some((r) => ["cloudseals_admin", "cloudseals_reviewer"].includes(r));
+  const alreadyPublished = st.published?.source_digest === st.source_digest;
+  const reason = el("input", { "aria-label": "Final report review reason", placeholder: "Final report review reason", maxlength: 2000 });
+  const publish = el("button", { disabled: Boolean(st.publication_blockers.length || alreadyPublished), onclick: safe(async (e) => {
+    if (!reason.value.trim()) return toast("Enter a final review reason before publishing", true);
+    const button = e.currentTarget; button.disabled = true;
+    try {
+      await api(`/v1/assessments/${aid}/diagnostic-report/publish`, { method: "POST", idem: true, body: { reason: reason.value.trim(), source_digest: st.source_digest } });
+      toast("Report and roadmap published to the customer"); await routes["use-cases"](aid);
+    } finally { button.disabled = false; }
+  }) }, "Publish report to customer");
+  const dlBtn = (label, qs, cls = "") => el("button", { class: cls, onclick: safe(async (e) => {
+    const button = e.currentTarget; button.disabled = true;
+    try { await dl(`/v1/assessments/${aid}/diagnostic-report${qs}`, `diagnostic-report-${st.status}.html`); } finally { button.disabled = false; }
+  }) }, label);
   return el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 5 · REPORT"), el("h3", {}, "Diagnostic report"))),
     el("p", { class: "help" }, "Contains only items a reviewer has validated. The narrative is optional and AI-drafted; everything else is assembled without a model."),
     el("p", {}, el("span", { class: `tag ${st.status === "FINAL" ? "ok" : "medium"}` }, st.status), st.missing.length ? ` Still needed: ${st.missing.join("; ")}.` : " Ready to deliver after your final check."),
-    el("div", { class: "row" }, dlBtn("Download report (HTML)", ""), dlBtn("Download with AI narrative", "?narrative=true", "secondary")));
+    el("div", { class: "row" }, dlBtn("Download report (HTML)", ""), dlBtn("Download with AI narrative", "?narrative=true", "secondary")),
+    el("p", { class: "help" }, "Downloads are reviewer previews. Publish after checking the report to give the customer the reviewed report and roadmap. The published version uses reviewed material without an AI narrative."),
+    st.publication_blockers.length ? el("p", { class: "module-note" }, `Before publication: ${st.publication_blockers.join("; ")}.`) : "",
+    canPublish ? el("div", { class: "row" }, reason, publish) : el("p", { class: "help" }, "A CloudSeals reviewer or admin publishes the final report."),
+    alreadyPublished ? el("p", { class: "help" }, "This reviewed material is already published to the customer.") : "",
+    st.versions.length ? el("div", {}, el("h4", {}, "Published versions"), st.versions.map((r) => el("p", { class: "row" },
+      `Version ${r.version} · ${when(r.published_at)} · ${r.published_by}`, el("button", { class: "secondary", onclick: safe(async () => {
+        await dl(`/v1/assessments/${aid}/diagnostic-report?report_id=${r.report_id}`, `diagnostic-report-v${r.version}-FINAL.html`);
+      }) }, `Download version ${r.version}`)))) : "");
+}
+
+function deliveredDiagnosticPanel(aid, delivery) {
+  if (!delivery) return el("section", { class: "module-panel" }, el("h3", {}, "Your report and improvement roadmap"),
+    el("p", { class: "empty-state" }, "CloudSeals is preparing your diagnostic results. The reviewed report and roadmap will appear here after publication."));
+  const { snapshot: s, facts: f } = delivery;
+  return el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "PUBLISHED BY CLOUDSEALS"),
+    el("h3", {}, "Your report and improvement roadmap"), el("p", { class: "help" }, `Version ${delivery.version} · ${when(delivery.published_at)}`),
+    el("div", { class: "row" }, el("button", { onclick: safe(async () => {
+      await dl(`/v1/assessments/${aid}/diagnostic-report?report_id=${delivery.report_id}`, `diagnostic-report-v${delivery.version}-FINAL.html`);
+    }) }, "Download published report (HTML)")),
+    el("p", {}, `${f.validated_use_cases} reviewed AI use case(s), ${f.validated_gaps} reviewed gap(s), maturity ${f.overall_maturity_score} / 5.`),
+    el("h4", {}, "Reviewed gaps"), s.gaps.length ? el("div", { class: "uc-list" }, s.gaps.map((g) => gapCard(aid, g, false, () => {})))
+      : el("p", { class: "help" }, "No reviewed gaps are included in this version."),
+    el("h4", {}, "Improvement roadmap"), el("p", { class: "help" }, `${f.roadmap_items} action(s), approximately ${f.roadmap_effort_days} person-days in total.`),
+    el("div", { class: "uc-list" }, s.roadmap.map((r) => el("article", { class: "uc-card" }, el("h4", {}, r.title),
+      el("p", {}, r.description), el("p", { class: "help" }, `${BAND_LABEL[r.timeline_band]} · ${r.responsible_role} · ${r.effort_days} person-days`),
+      el("ul", { class: "fw-controls" }, r.success_criteria.map((c) => el("li", {}, c)))))));
 }
 
 function pipelineStepper(inv) {
@@ -1531,7 +1571,7 @@ routes["use-cases"] = async (aidArg) => {
   const validatedGaps = inv.gaps.some((g) => g.status === "VALIDATED");
   const staffPanels = canReview ? [maturityPanel(aid, inv, canReview, validated > 0, redraw), roadmapPanel(aid, inv, canReview, validatedGaps || inv.maturity?.status === "VALIDATED", redraw), overlayPanel(aid, inv, canReview, validated > 0, redraw), await reportPanel(aid)] : [];
   main.replaceChildren(moduleFrame("DIAGNOSIS · AI GOVERNANCE STUDIO", "Diagnostic studio", "From documents to a reviewed inventory, framework gaps, maturity, roadmap and report. Every step is a draft until a CloudSeals reviewer validates it.",
-    canReview ? pipelineStepper(inv) : "", useCasePanel, gapPanel, ...staffPanels));
+    canReview ? pipelineStepper(inv) : deliveredDiagnosticPanel(aid, inv.delivery), useCasePanel, gapPanel, ...staffPanels));
 };
 
 routes.frameworks = async (fid) => {
@@ -1709,7 +1749,7 @@ routes.case = async (cid) => {
           isLead ? el("div", { class: "row" }, next, why, el("button", { onclick: safe(async () => { if (!why.value.trim()) return toast("Enter a reason first", true);
             await api(`/v1/cases/${cid}/status`, { method: "POST", body: { status: next.value, reason: why.value.trim() } }); toast("Status updated"); draw(); }) }, "Update status"))
             : el("p", { class: "help" }, "Only the lead architect or an admin changes the status."),
-          el("p", { class: "help" }, "Delivered needs a FINAL diagnostic report on a linked assessment."),
+          el("p", { class: "help" }, "Publish a diagnostic report to the customer before marking the case delivered."),
           el("ul", { class: "case-history" }, [...c.status_history].reverse().map((h) => el("li", {}, caseStatusChip(h.status), ` ${when(h.at)} · ${h.by} · ${h.reason}`)))));
     } else if (tab === "assessments") {
       const all = (await api("/v1/assessments")).items.filter((a) => !c.assessment_ids.includes(a.assessment_id) && (!c.tenant_id || a.tenant_id === c.tenant_id));

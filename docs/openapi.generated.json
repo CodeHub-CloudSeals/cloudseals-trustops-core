@@ -2176,6 +2176,179 @@
      }
     }
    }
+  },
+  "/v1/assessments/{aid}/diagnostic-report": {
+   "get": {
+    "summary": "Diagnostic Report",
+    "description": "Staff preview working material. Customers download only explicitly published, immutable versions.",
+    "operationId": "diagnostic_report_v1_assessments__aid__diagnostic_report_get",
+    "parameters": [
+     {
+      "name": "aid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Aid"
+      }
+     },
+     {
+      "name": "narrative",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "type": "boolean",
+       "default": false,
+       "title": "Narrative"
+      }
+     },
+     {
+      "name": "format",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "enum": [
+        "html",
+        "json"
+       ],
+       "type": "string",
+       "default": "html",
+       "title": "Format"
+      }
+     },
+     {
+      "name": "report_id",
+      "in": "query",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Report Id"
+      }
+     },
+     {
+      "name": "authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Authorization"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
+  },
+  "/v1/assessments/{aid}/diagnostic-report/publish": {
+   "post": {
+    "summary": "Publish Diagnostic Report",
+    "operationId": "publish_diagnostic_report_v1_assessments__aid__diagnostic_report_publish_post",
+    "parameters": [
+     {
+      "name": "aid",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "title": "Aid"
+      }
+     },
+     {
+      "name": "idempotency-key",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Idempotency-Key"
+      }
+     },
+     {
+      "name": "authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "title": "Authorization"
+      }
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "$ref": "#/components/schemas/PublishDiagnosticRequest"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Successful Response",
+      "content": {
+       "application/json": {
+        "schema": {}
+       }
+      }
+     },
+     "422": {
+      "description": "Validation Error",
+      "content": {
+       "application/json": {
+        "schema": {
+         "$ref": "#/components/schemas/HTTPValidationError"
+        }
+       }
+      }
+     }
+    }
+   }
   }
  },
  "components": {
@@ -2669,6 +2842,27 @@
      "invoices"
     ],
     "title": "WorkflowRunRequest"
+   },
+   "PublishDiagnosticRequest": {
+    "properties": {
+     "reason": {
+      "type": "string",
+      "maxLength": 2000,
+      "minLength": 1,
+      "title": "Reason"
+     },
+     "source_digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Digest"
+     }
+    },
+    "type": "object",
+    "required": [
+     "reason",
+     "source_digest"
+    ],
+    "title": "PublishDiagnosticRequest"
    }
   }
  }

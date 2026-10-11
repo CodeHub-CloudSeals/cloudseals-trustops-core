@@ -46,9 +46,9 @@ def test_case_lifecycle_acl_and_links(env):
     second = create(c, h, tenant_id="t-bank").json()["case_id"]
     assert c.post(f"/v1/cases/{second}/assessments", headers=h("architect@cloudseals"), json={"assessment_id": aid}).status_code == 409
 
-    # status: delivery needs a FINAL report on a linked assessment
+    # Delivery requires explicit customer publication, not just a ready preview.
     bad = c.post(f"/v1/cases/{cid}/status", headers=h("architect@cloudseals"), json={"status": "delivered", "reason": "done"})
-    assert bad.status_code == 409 and bad.json()["code"] == "report_not_final"
+    assert bad.status_code == 409 and bad.json()["code"] == "report_not_published"
     ok = c.post(f"/v1/cases/{cid}/status", headers=h("architect@cloudseals"), json={"status": "intake", "reason": "Documents received"}).json()
     assert ok["status"] == "intake" and [x["status"] for x in ok["status_history"]] == ["draft", "intake"]
 
@@ -86,6 +86,12 @@ def test_case_progress_reflects_validated_work_and_delivery_unlocks(env, monkeyp
     c.patch(f"/v1/assessments/{aid}/roadmap/{rid}", headers=h(rev), json=ok)
     prog = c.get(f"/v1/cases/{cid}", headers=h(rev)).json()["progress"]
     assert prog["report"] == "final" and prog["maturity_score"] == 1.5 and prog["validated_roadmap_items"] == 1
+    premature = c.post(f"/v1/cases/{cid}/status", headers=h("architect@cloudseals"), json={"status": "delivered", "reason": "Preview ready"})
+    assert premature.status_code == 409
+    digest = c.get(f"/v1/assessments/{aid}/diagnostic-report?format=json", headers=h(rev)).json()["source_digest"]
+    published = c.post(f"/v1/assessments/{aid}/diagnostic-report/publish", headers=h(rev, **{"Idempotency-Key": "publish"}),
+                       json={"reason": "Final review complete", "source_digest": digest})
+    assert published.status_code == 200, published.text
     done = c.post(f"/v1/cases/{cid}/status", headers=h("architect@cloudseals"), json={"status": "delivered", "reason": "Report sent"})
     assert done.status_code == 200 and done.json()["status"] == "delivered"
     listing = c.get("/v1/cases?status=delivered&q=demo", headers=h(rev)).json()

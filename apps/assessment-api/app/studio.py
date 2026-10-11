@@ -216,7 +216,7 @@ def build_report_html(assessment: dict, tenant_name: str, use_cases: list[dict],
     status, missing = report_status(use_cases, maturity, roadmap)
     facts = report_facts(use_cases, gaps, maturity, roadmap)
     digest = hashlib.sha256(json.dumps({"uc": use_cases, "gaps": gaps, "m": maturity, "r": roadmap, "o": overlay}, sort_keys=True, default=str).encode()).hexdigest()
-    sev_cls = {"critical": "#a4111f", "high": "#d9534f", "medium": "#c98a14", "low": "#6b6a63", "info": "#6b6a63"}
+    sev_cls = {"critical": "#a4111f", "high": "#d9534f", "medium": "#c98a14", "low": "#52647e", "info": "#52647e"}
     rows_uc = "".join(
         f"<tr><td><strong>{e(u['name'])}</strong><br><small>{e(u['description'])}</small></td><td>{e(u['risk_tier'].replace('_', ' '))}</td>"
         f"<td>{e(u.get('business_owner') or '-')}</td><td>{e((u.get('decision_authority') or '-').replace('_', ' '))}</td>"
@@ -253,14 +253,14 @@ def build_report_html(assessment: dict, tenant_name: str, use_cases: list[dict],
         ov_html = ("<h2>Architecture overlay</h2>" + img(overlay["current"], "Current architecture (as evidenced)") + img(overlay["target"], "Recommended target architecture")
                    + "".join(f"<p>{e(p)}</p>" for p in overlay["gap_commentary"].split("\n\n")) + "<ul>" + "".join(f"<li>{e(d)}</li>" for d in overlay["key_differences"]) + "</ul>")
     banner = "" if status == "FINAL" else f"<div class='draft'>DRAFT: {e('; '.join(missing))}. Do not rely on this document.</div>"
-    css = ("body{font:15px/1.6 Georgia,serif;max-width:900px;margin:40px auto;padding:0 24px;color:#1f1e1d}h1,h2,h3{font-weight:500}"
-           "h2{border-bottom:1px solid #e8e6dc;padding-bottom:6px;margin-top:40px}table{width:100%;border-collapse:collapse;font:13px sans-serif}"
-           "td,th{border-bottom:1px solid #e8e6dc;padding:8px;text-align:left;vertical-align:top}blockquote{margin:4px 0;padding:4px 10px;border-left:3px solid #e0a083;"
-           "background:#faf9f5;font-style:italic}.card{border:1px solid #e8e6dc;border-radius:10px;padding:12px 16px;margin:10px 0}.sev{color:#fff;padding:1px 8px;"
+    css = ("body{font:15px/1.6 system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 24px;color:#17243d}h1,h2,h3{font-weight:500}"
+           "h2{border-bottom:1px solid #d9e4f0;padding-bottom:6px;margin-top:40px}table{width:100%;border-collapse:collapse;font:13px sans-serif}"
+           "td,th{border-bottom:1px solid #d9e4f0;padding:8px;text-align:left;vertical-align:top}blockquote{margin:4px 0;padding:4px 10px;border-left:3px solid #7ebed7;"
+           "background:#f5f8fc;font-style:italic}.card{border:1px solid #d9e4f0;border-radius:10px;padding:12px 16px;margin:10px 0}.sev{color:#fff;padding:1px 8px;"
            "border-radius:99px;font:700 11px sans-serif}.draft{background:#fbf4e4;border:1px solid #e8cf9f;padding:12px;font:700 14px sans-serif;margin:16px 0}"
-           ".muted,small{color:#6b6a63}.tag{font:700 11px sans-serif;color:#a8512f;text-transform:uppercase}"
-           ".bar{display:flex;gap:10px;align-items:center;font:13px sans-serif}.bar span{width:170px}.bar i{flex:1;height:8px;background:#efede4;border-radius:99px;overflow:hidden}"
-           ".bar b{display:block;height:8px;background:#c96442}.bar em{width:32px;font-style:normal}"
+           ".muted,small{color:#52647e}.tag{font:700 11px sans-serif;color:#143197;text-transform:uppercase}"
+           ".bar{display:flex;gap:10px;align-items:center;font:13px sans-serif}.bar span{width:170px}.bar i{flex:1;height:8px;background:#e4ecf5;border-radius:99px;overflow:hidden}"
+           ".bar b{display:block;height:8px;background:#143197}.bar em{width:32px;font-style:normal}"
            + "".join(f".w{n}{{width:{n}%}}" for n in range(0, 101, 1)))
     doc = (f"<!doctype html><html lang='en-GB'><head><meta charset='utf-8'><title>{e(assessment['ai_system_name'])} - AI governance diagnostic</title>"
            f"<style>{css}</style></head><body><p class='tag'>CloudSeals · TrustOps diagnostic report · {status}</p>"
@@ -346,7 +346,7 @@ def run_overlay(client: Optional[ModelClient], use_cases: list[dict], gaps: list
                         "principles_missing_from_target": sorted({"P1", "P2", "P3", "P4", "P5"} - covered), "status": "UNREVIEWED"}}
 
 
-_KIND_STYLE = {"system": ("#ffffff", "#d6d3c5"), "data": ("#f5f4ed", "#d6d3c5"), "model": ("#fbf1ec", "#e0a083"), "human": ("#eef6f1", "#b9d9c7"),
+_KIND_STYLE = {"system": ("#ffffff", "#d6d3c5"), "data": ("#f5f4ed", "#d6d3c5"), "model": ("#fbf1ec", "#7ebed7"), "human": ("#eef6f1", "#b9d9c7"),
                "control": ("#fbf4e4", "#e8cf9f"), "unknown": ("#ffffff", "#b3a99a")}
 
 
@@ -375,7 +375,7 @@ def render_svg(graph: dict, title: str) -> str:
     esc = html.escape
     out = [f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {width} {height}' width='{width}' height='{height}' role='img' aria-label='{esc(title, quote=True)}'>",
            "<defs><marker id='ar' viewBox='0 0 10 10' refX='9' refY='5' markerWidth='7' markerHeight='7' orient='auto'><path d='M0 0L10 5L0 10z' fill='#8f8d84'/></marker></defs>",
-           f"<rect width='{width}' height='{height}' fill='#faf9f5'/><text x='{pad}' y='{pad + 4}' font-family='Georgia,serif' font-size='15' fill='#1f1e1d'>{esc(title)}</text>"]
+           f"<rect width='{width}' height='{height}' fill='#f5f8fc'/><text x='{pad}' y='{pad + 4}' font-family='Georgia,serif' font-size='15' fill='#17243d'>{esc(title)}</text>"]
     for e in edges:
         (x1, y1), (x2, y2) = pos[e["from"]], pos[e["to"]]
         a, b = (x1 + w, y1 + h / 2), (x2, y2 + h / 2)

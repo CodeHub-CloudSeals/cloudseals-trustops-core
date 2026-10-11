@@ -1,6 +1,7 @@
 """TAAD assessment API (modular monolith). Implements taad_assessment_api_v1.yaml locally."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -770,6 +771,7 @@ def _inv(aid: str) -> dict:
     inv.setdefault("maturity", None)
     inv.setdefault("roadmap", [])
     inv.setdefault("overlay", None)
+    inv.setdefault("published_diagnostics", [])
     return inv
 
 
@@ -829,9 +831,11 @@ def _overlay_view(o: Optional[dict]) -> Optional[dict]:
 def get_inventory(aid: str, p: Principal = Depends(principal)):
     get_assessment(p, aid)
     inv = _inv(aid)
-    staff = p.is_staff   # gaps, maturity and the roadmap are reviewer material until a report is published
+    staff = p.is_staff   # Working material stays private; customers receive only a published snapshot.
+    released = inv["published_diagnostics"][-1] if inv["published_diagnostics"] else None
     return {"use_cases": inv["use_cases"], "gaps": inv["gaps"] if staff else [], "maturity": inv["maturity"] if staff else None,
             "roadmap": inv["roadmap"] if staff else [], "overlay": _overlay_view(inv["overlay"]) if staff else None,
+            "delivery": {**_diagnostic_release_view(released), "snapshot": released["snapshot"]} if released else None,
             "gaps_note": None if staff else "Gap analysis, maturity and roadmap follow reviewer approval"}
 
 
@@ -971,27 +975,128 @@ def review_overlay(aid: str, body: ReviewItem, p: Principal = Depends(principal)
     return _overlay_view(o)
 
 
-@app.get("/v1/assessments/{aid}/diagnostic-report")
-def diagnostic_report(aid: str, narrative: bool = False, format: Literal["html", "json"] = "html", p: Principal = Depends(principal)):
-    """Reviewer-validated material only. HTML is delivered as a download (the portal CSP forbids rendering it in place)."""
+def _diagnostic_material(inv: dict) -> dict:
+    """Copy reviewed inputs so a customer release cannot change when working material changes."""
+    return copy.deepcopy({"use_cases": [u for u in inv["use_cases"] if u["status"] == "VALIDATED"],
+                          "gaps": [g for g in inv["gaps"] if g["status"] == "VALIDATED"],
+                          "maturity": inv["maturity"] if inv["maturity"] and inv["maturity"]["status"] == "VALIDATED" else None,
+                          "roadmap": [i for i in inv["roadmap"] if i["status"] == "VALIDATED"],
+                          "overlay": inv["overlay"] if inv["overlay"] and inv["overlay"]["status"] == "VALIDATED" else None})
+
+
+def _diagnostic_source_digest(a: dict, material: dict) -> str:
+    return hashlib.sha256(json.dumps({"assessment": a, "material": material}, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _diagnostic_release_view(release: dict) -> dict:
+    return {k: release[k] for k in ("report_id", "version", "published_at", "published_by", "publication_reason", "source_digest", "content_digest", "facts")}
+
+
+def _publication_blockers(aid: str, material: dict) -> list[str]:
+    _, missing = studio.report_status(material["use_cases"], material["maturity"], material["roadmap"])
+    uids = {u["use_case_id"] for u in material["use_cases"]}
+    gids = {g["gap_id"] for g in material["gaps"]}
+    rids = {r["item_id"] for r in material["roadmap"]}
+    for u in material["use_cases"]:
+        ev = STORE.evidence.get(u["evidence_id"])
+        if not ev or ev["assessment_id"] != aid or ev["state"] != "clean":
+            missing.append(f"clean source evidence required for {u['name']}")
+    if any(not set(g["evidence_use_case_ids"]) <= uids for g in material["gaps"]):
+        missing.append("a validated gap cites a use case that is no longer validated")
+    mat = material["maturity"]
+    if mat and any(not set(refs) <= uids | gids for refs in mat["evidence_refs"].values()):
+        missing.append("maturity cites an item that is no longer validated")
+    overlay = material["overlay"]
+    if overlay and any(not set(n.get("evidence_refs", [])) <= uids | gids for n in overlay["current"]["nodes"]):
+        missing.append("architecture cites an item that is no longer validated")
+    if any(not set(r["gap_ids_addressed"]) <= gids or not set(r["dependencies"]) <= rids for r in material["roadmap"]):
+        missing.append("roadmap cites a gap or dependency that is no longer validated")
+    covered = {gid for r in material["roadmap"] for gid in r["gap_ids_addressed"]}
+    uncovered = [g["title"] for g in material["gaps"] if g["severity"] in ("critical", "high") and g["gap_id"] not in covered]
+    if uncovered:
+        missing.append("validated roadmap must address critical/high gaps: " + "; ".join(uncovered))
+    return missing
+
+
+class PublishDiagnosticRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
+    source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@app.post("/v1/assessments/{aid}/diagnostic-report/publish")
+def publish_diagnostic_report(aid: str, body: PublishDiagnosticRequest, p: Principal = Depends(principal),
+                              idempotency_key: Optional[str] = Header(default=None)):
     a = get_assessment(p, aid)
-    require(p, *STAFF_REVIEW)
-    inv = _inv(aid)
-    ucs = [u for u in inv["use_cases"] if u["status"] == "VALIDATED"]
-    gaps = [g for g in inv["gaps"] if g["status"] == "VALIDATED"]
-    mat = inv["maturity"] if inv["maturity"] and inv["maturity"]["status"] == "VALIDATED" else None
-    road = [i for i in inv["roadmap"] if i["status"] == "VALIDATED"]
-    status, missing = studio.report_status(ucs, mat, road)
-    facts = studio.report_facts(ucs, gaps, mat, road)
-    if format == "json":
-        return {"status": status, "missing": missing, "facts": facts}
-    story = studio.draft_narrative(SWASKA_CLIENT, facts) if narrative else None
-    ov = inv["overlay"] if inv["overlay"] and inv["overlay"]["status"] == "VALIDATED" else None
-    doc, digest = studio.build_report_html(a, (STORE.tenants.get(a["tenant_id"]) or {}).get("name") or a["tenant_id"], ucs, gaps, mat, road, story, p.sub, ov)
+    require(p, "cloudseals_admin", "cloudseals_reviewer")
+    if not body.reason.strip():
+        raise err(422, "review_reason_required", "Enter a final review reason")
+
+    def publish():
+        inv = _inv(aid)
+        material = _diagnostic_material(inv)
+        source_digest = _diagnostic_source_digest(a, material)
+        if source_digest != body.source_digest:
+            raise err(409, "report_changed", "Reviewed material changed; reload and check the report before publishing")
+        missing = _publication_blockers(aid, material)
+        if missing:
+            raise err(409, "report_not_ready", "Cannot publish: " + "; ".join(missing))
+        releases = inv["published_diagnostics"]
+        if releases and releases[-1]["source_digest"] == source_digest:
+            return _diagnostic_release_view(releases[-1])
+        doc, _ = studio.build_report_html(a, (STORE.tenants.get(a["tenant_id"]) or {}).get("name") or a["tenant_id"],
+                                         material["use_cases"], material["gaps"], material["maturity"], material["roadmap"], None, p.sub, material["overlay"])
+        release = {"report_id": str(uuid.uuid4()), "version": len(releases) + 1, "published_at": time.time(), "published_by": p.sub,
+                   "publication_reason": body.reason.strip(), "source_digest": source_digest, "content_digest": hashlib.sha256(doc.encode()).hexdigest(),
+                   "facts": studio.report_facts(material["use_cases"], material["gaps"], material["maturity"], material["roadmap"]),
+                   "snapshot": material, "html": doc, "system_name": a["ai_system_name"]}
+        releases.append(release)
+        audit(p, "report.diagnostic_published", aid)
+        return _diagnostic_release_view(release)
+
+    return idempotent(p, idempotency_key, f"publish-diagnostic:{aid}:{body.source_digest}", publish)
+
+
+@app.get("/v1/assessments/{aid}/diagnostic-report")
+def diagnostic_report(aid: str, narrative: bool = False, format: Literal["html", "json"] = "html", report_id: Optional[str] = None,
+                      p: Principal = Depends(principal)):
+    """Staff preview working material. Customers download only explicitly published, immutable versions."""
+    a = get_assessment(p, aid)
+    with STORE.lock:
+        inv = _inv(aid)
+        release = next((r for r in inv["published_diagnostics"] if r["report_id"] == report_id), None) if report_id else None
+        if report_id and not release:
+            raise err(404, "not_found", "Report version not found")
+        if not p.is_staff and not release:
+            release = inv["published_diagnostics"][-1] if inv["published_diagnostics"] else None
+            if not release:
+                if format == "json":
+                    return {"status": "AWAITING_PUBLICATION", "missing": [], "facts": None, "published": None}
+                raise err(403, "report_not_published", "A reviewer has not published a diagnostic report yet")
+        if release:
+            if format == "json":
+                return {"status": "FINAL", "missing": [], "facts": release["facts"], "published": _diagnostic_release_view(release)}
+            doc, digest, status, system_name = release["html"], release["content_digest"], "FINAL", release["system_name"]
+        else:
+            require(p, *STAFF_REVIEW)
+            material = _diagnostic_material(inv)
+            latest = _diagnostic_release_view(inv["published_diagnostics"][-1]) if inv["published_diagnostics"] else None
+            status, missing = studio.report_status(material["use_cases"], material["maturity"], material["roadmap"])
+            facts = studio.report_facts(material["use_cases"], material["gaps"], material["maturity"], material["roadmap"])
+            if format == "json":
+                return {"status": status, "missing": missing, "facts": facts, "source_digest": _diagnostic_source_digest(a, material),
+                        "publication_blockers": _publication_blockers(aid, material), "published": latest,
+                        "versions": [_diagnostic_release_view(r) for r in inv["published_diagnostics"]]}
+            system_name = a["ai_system_name"]
+    if not release:
+        story = studio.draft_narrative(SWASKA_CLIENT, facts) if narrative else None
+        doc, digest = studio.build_report_html(a, (STORE.tenants.get(a["tenant_id"]) or {}).get("name") or a["tenant_id"],
+                                             material["use_cases"], material["gaps"], material["maturity"], material["roadmap"],
+                                             story, p.sub, material["overlay"])
     audit(p, "report.diagnostic", f"{aid}/{digest[:12]}")
-    name = re.sub(r"[^A-Za-z0-9_-]+", "_", a["ai_system_name"])[:60] or "assessment"
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", system_name)[:60] or "assessment"
     return Response(doc, media_type="text/html; charset=utf-8", headers={
-        "Content-Disposition": f'attachment; filename="diagnostic_{name}_{status}.html"', "X-Report-Status": status, "X-Content-Digest": digest})
+        "Content-Disposition": f'attachment; filename="diagnostic_{name}_{status}.html"', "X-Report-Status": status, "X-Content-Digest": digest,
+        **({"X-Report-Version": str(release["version"])} if release else {})})
 
 
 # ---------- user and access administration (CloudSeals admins) ----------
@@ -1274,9 +1379,9 @@ def patch_case(cid: str, body: CasePatch, p: Principal = Depends(principal)):
 def change_case_status(cid: str, body: CaseStatusChange, p: Principal = Depends(principal)):
     c = _case_for(p, cid, write=True)
     if body.status == "delivered":
-        finals = [a for a in c["assessment_ids"] if _case_progress({"assessment_ids": [a]})["report"] == "final"]
+        finals = [a for a in c["assessment_ids"] if _inv(a)["published_diagnostics"]]
         if not finals:
-            raise err(409, "report_not_final", "A case can be delivered only when a linked assessment has a FINAL diagnostic report")
+            raise err(409, "report_not_published", "Publish a diagnostic report to the customer before marking this case delivered")
     with STORE.lock:
         c["status"] = body.status
         c["status_history"].append({"status": body.status, "by": p.sub, "at": time.time(), "reason": body.reason})

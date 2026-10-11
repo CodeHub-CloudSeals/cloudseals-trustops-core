@@ -70,6 +70,24 @@ def test_reviewer_runs_the_whole_pipeline_to_a_final_report(as_user, api, assess
     assert "Customer service chatbot" not in text                      # the unvalidated candidate never reaches the report
     assert page.errors == []
 
+    # Final preview does not expose the result to a customer until a reviewer publishes it.
+    customer = as_user("admin@t-bank", f"use-cases/{assessment}")
+    expect(customer.get_by_role("button", name="Download published report (HTML)")).to_have_count(0)
+    expect(customer.get_by_text("after publication", exact=False)).to_be_visible()
+    report.get_by_label("Final report review reason").fill("Final report and roadmap checked against evidence")
+    report.get_by_role("button", name="Publish report to customer").click()
+    expect(page.get_by_text("This reviewed material is already published to the customer.")).to_be_visible()
+    expect(page.get_by_role("button", name="Publish report to customer")).to_be_disabled()
+    customer.reload()
+    expect(customer.get_by_role("heading", name="Your report and improvement roadmap")).to_be_visible()
+    expect(customer.get_by_role("heading", name="Run and document an Article 5 screening", exact=True)).to_be_visible()
+    expect(customer.get_by_role("button", name="Publish report to customer")).to_have_count(0)
+    with customer.expect_download() as delivered:
+        customer.get_by_role("button", name="Download published report (HTML)").click()
+    released = open(delivered.value.path(), encoding="utf-8").read()
+    assert "Credit scoring model" in released and "Customer service chatbot" not in released
+    assert customer.errors == []
+
 
 def test_report_stays_draft_until_everything_is_validated(as_user, api, assessment):
     api("admin@t-bank", "POST", f"/v1/assessments/{assessment}/inventory/run", {})
