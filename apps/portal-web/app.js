@@ -1380,7 +1380,7 @@ function useCaseCard(aid, u, canReview, redraw) {
     meta.length ? el("dl", { class: "uc-meta" }, meta.map(([k, v]) => el("div", {}, el("dt", {}, k), el("dd", {}, v)))) : "",
     el("p", { class: "uc-why" }, el("strong", {}, "Why this risk tier (candidate, not a legal conclusion): "), u.risk_tier_rationale),
     el("div", { class: "uc-quotes" }, el("span", { class: "eyebrow" }, `EVIDENCE FROM ${u.source_filename}`), u.source_quotes.map((q) => el("blockquote", {}, q))),
-    u.status !== "UNREVIEWED" ? el("p", { class: "help" }, `${STATUS_LABEL[u.status]} by ${u.reviewed_by}: ${u.review_reason}`)
+    u.status !== "UNREVIEWED" ? el("p", { class: "help" }, canReview ? `${STATUS_LABEL[u.status]} by ${u.reviewed_by}: ${u.review_reason}` : `${STATUS_LABEL[u.status]} by CloudSeals`)
       : canReview ? reviewControls(u.name, async (status, reason) => { await api(`/v1/assessments/${aid}/inventory/use-cases/${u.use_case_id}`, { method: "PATCH", body: { status, reason } }); toast(`Use case ${status}`); redraw(); })
         : el("p", { class: "help" }, "Waiting for a CloudSeals reviewer to validate this use case."));
 }
@@ -1392,7 +1392,7 @@ function gapCard(aid, g, canReview, redraw) {
     el("p", { class: "uc-desc" }, g.description),
     el("p", { class: "uc-why" }, el("strong", {}, "Suggested action: "), g.recommendation, ` (about ${g.estimated_effort_days} person-days, ${g.suggested_timeline} days)`),
     g.evidence_quotes.length ? el("div", { class: "uc-quotes" }, el("span", { class: "eyebrow" }, "EVIDENCE"), g.evidence_quotes.map((q) => el("blockquote", {}, q))) : "",
-    g.status !== "UNREVIEWED" ? el("p", { class: "help" }, `${STATUS_LABEL[g.status]} by ${g.reviewed_by}: ${g.review_reason}`)
+    g.status !== "UNREVIEWED" ? el("p", { class: "help" }, canReview ? `${STATUS_LABEL[g.status]} by ${g.reviewed_by}: ${g.review_reason}` : `${STATUS_LABEL[g.status]} by CloudSeals`)
       : canReview ? reviewControls(g.title, async (status, reason) => { await api(`/v1/assessments/${aid}/gaps/${g.gap_id}`, { method: "PATCH", body: { status, reason } }); toast(`Gap ${status}`); redraw(); }) : "");
 }
 

@@ -68,7 +68,8 @@ def test_publication_requires_reviewer_and_is_idempotent_tenant_scoped_and_froze
     assert download.status_code == 200 and download.headers['x-report-version'] == '1'
     assert download.headers['x-content-digest'] == hashlib.sha256(download.content).hexdigest() == r['content_digest']
     assert 'FINAL' in download.text and 'Item a' in download.text
-    assert c.get(root + '/diagnostic-report?format=json', headers=h('admin@t-bank')).json()['published'] == r
+    seen_by_customer = c.get(root + '/diagnostic-report?format=json', headers=h('admin@t-bank')).json()['published']
+    assert seen_by_customer == {k: v for k, v in r.items() if k not in ('published_by', 'publication_reason')}     # who published and why stay internal
     assert c.get(root + '/diagnostic-report', headers=h('admin@t-health')).status_code == 404
     assert c.get(root + '/diagnostic-report?report_id=missing', headers=h('admin@t-bank')).status_code == 404
 
@@ -116,3 +117,17 @@ def test_new_versions_and_published_html_survive_storage_reload(reviewed, tmp_pa
     assert c.get(root + '/diagnostic-report?report_id=' + one['report_id'], headers=h('admin@t-bank')).content == old_html
     other = new_assessment(c, h, 'admin@t-bank', key='another-assessment')
     assert c.get(f'/v1/assessments/{other}/diagnostic-report?report_id=' + one['report_id'], headers=h('admin@t-bank')).status_code == 404
+
+
+def test_customers_never_see_who_reviewed_or_the_reviewers_internal_notes(reviewed):
+    import json
+    c, h, aid, uid, gid, rid = reviewed
+    assert publish(c, h, aid).status_code == 200
+    customer = c.get(f'/v1/assessments/{aid}/inventory', headers=h('admin@t-bank')).json()
+    blob = json.dumps(customer)
+    for leaked in ('reviewer@cloudseals', 'reviewed_by', 'review_reason', 'reviewed_at', 'notes_for_architect', 'Checked against source evidence'):
+        assert leaked not in blob, leaked
+    assert customer['delivery']['snapshot']['gaps'][0]['status'] == 'VALIDATED'          # the content itself is still delivered
+    assert customer['use_cases'][0]['status'] == 'VALIDATED' and customer['delivery']['snapshot']['maturity']['overall_score'] == 1.5
+    staff = json.dumps(c.get(f'/v1/assessments/{aid}/inventory', headers=h('reviewer@cloudseals')).json())
+    assert 'reviewer@cloudseals' in staff and 'notes_for_architect' in staff                # reviewers keep the full record

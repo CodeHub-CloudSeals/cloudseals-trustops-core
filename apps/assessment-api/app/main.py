@@ -833,9 +833,11 @@ def get_inventory(aid: str, p: Principal = Depends(principal)):
     inv = _inv(aid)
     staff = p.is_staff   # Working material stays private; customers receive only a published snapshot.
     released = inv["published_diagnostics"][-1] if inv["published_diagnostics"] else None
-    return {"use_cases": inv["use_cases"], "gaps": inv["gaps"] if staff else [], "maturity": inv["maturity"] if staff else None,
+    return {"use_cases": inv["use_cases"] if staff else _for_customer(inv["use_cases"]), "gaps": inv["gaps"] if staff else [],
+            "maturity": inv["maturity"] if staff else None,
             "roadmap": inv["roadmap"] if staff else [], "overlay": _overlay_view(inv["overlay"]) if staff else None,
-            "delivery": {**_diagnostic_release_view(released), "snapshot": released["snapshot"]} if released else None,
+            "delivery": ({**_diagnostic_release_view(released, customer=not staff),
+                          "snapshot": released["snapshot"] if staff else _for_customer(released["snapshot"])} if released else None),
             "gaps_note": None if staff else "Gap analysis, maturity and roadmap follow reviewer approval"}
 
 
@@ -984,12 +986,25 @@ def _diagnostic_material(inv: dict) -> dict:
                           "overlay": inv["overlay"] if inv["overlay"] and inv["overlay"]["status"] == "VALIDATED" else None})
 
 
+_INTERNAL_REVIEW_FIELDS = ("reviewed_by", "review_reason", "reviewed_at", "notes_for_architect")
+
+
+def _for_customer(value: Any) -> Any:
+    """Customers see that CloudSeals reviewed something, never who reviewed it or the reviewer's internal notes."""
+    if isinstance(value, dict):
+        return {k: _for_customer(v) for k, v in value.items() if k not in _INTERNAL_REVIEW_FIELDS}
+    if isinstance(value, list):
+        return [_for_customer(v) for v in value]
+    return value
+
+
 def _diagnostic_source_digest(a: dict, material: dict) -> str:
     return hashlib.sha256(json.dumps({"assessment": a, "material": material}, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _diagnostic_release_view(release: dict) -> dict:
-    return {k: release[k] for k in ("report_id", "version", "published_at", "published_by", "publication_reason", "source_digest", "content_digest", "facts")}
+def _diagnostic_release_view(release: dict, customer: bool = False) -> dict:
+    keys = ("report_id", "version", "published_at", "source_digest", "content_digest", "facts")
+    return {k: release[k] for k in (keys if customer else keys[:3] + ("published_by", "publication_reason") + keys[3:])}
 
 
 def _publication_blockers(aid: str, material: dict) -> list[str]:
@@ -1074,7 +1089,7 @@ def diagnostic_report(aid: str, narrative: bool = False, format: Literal["html",
                 raise err(403, "report_not_published", "A reviewer has not published a diagnostic report yet")
         if release:
             if format == "json":
-                return {"status": "FINAL", "missing": [], "facts": release["facts"], "published": _diagnostic_release_view(release)}
+                return {"status": "FINAL", "missing": [], "facts": release["facts"], "published": _diagnostic_release_view(release, customer=not p.is_staff)}
             doc, digest, status, system_name = release["html"], release["content_digest"], "FINAL", release["system_name"]
         else:
             require(p, *STAFF_REVIEW)
