@@ -35,3 +35,11 @@ Before production use, engineering must:
 - Run hosted integration, golden-path and adversarial tests (exact, ambiguous, high-value, duplicate, prompt injection, token replay/expiry, tenant crossover, PRE-COMMIT failure, connector timeout/retry, COMMIT failure), restore/recovery drills, penetration testing, and operational acceptance.
 
 The original requirement remains: probabilistic agents may recommend or prepare only; deterministic policy and explicit human authority govern consequential actions; failed evidence PRE-COMMIT blocks execution.
+
+## Advisory agents (TAAD / TrustOps)
+
+Four read-only advisory agents sit beside the six runtime workers: Evidence Extractor, Findings Summarizer, POC Drafter and Approval Summarizer (`taad_agent_manifests_v1.json`, `app/taad_agents.py`, `GET /v1/agents`). They suggest; they never write answers, findings, approvals or blueprints, and every output is labelled `advisory_only` / `persisted: false`.
+
+Production controls: allowlisted tools per manifest; deterministic output by default; when `TAAD_SWASKA_MODEL=bedrock`, model JSON is schema-checked, grounded (extraction excerpts must exist verbatim in the evidence, finding rule IDs must match, the approval summary must keep the policy reason code) and rejected to the deterministic fallback otherwise; compliance/verification claims are rejected; tenant isolation and role gates on every route; audit entry per call; per-user limit of `TAAD_AGENT_CALLS_PER_MINUTE` (default 20, in-memory per instance — use a shared limiter or WAF rate rule when running more than one task); model output is capped at 1500 tokens.
+
+Portal: Evidence panel ("Suggest answers from this file"), reviewer panel ("Summarise findings"), POC blueprint form ("Draft scope notes"), Approvals and TrustOps run ("Summarise for approver"), and Administration → Agents.

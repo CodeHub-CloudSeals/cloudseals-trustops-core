@@ -51,6 +51,23 @@ def _verify_dev(token: str) -> Optional[str]:
         return None
 
 
+AUTH_PROVIDER = os.environ.get("TAAD_AUTH_PROVIDER", "").strip().lower()   # "google" = Google ID tokens (Workspace / Gmail)
+
+
+def _verify_google(token: str) -> Optional[dict]:
+    """Google ID token: signature, expiry, issuer and audience (our OAuth client ID) are checked by google-auth."""
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token
+        claims = id_token.verify_oauth2_token(token, google_requests.Request(), audience=os.environ["TAAD_GOOGLE_CLIENT_ID"])
+        if not claims.get("sub"):
+            return None
+        return {"sub": f"google:{claims['sub']}", "email": str(claims.get("email", "")).lower(),
+                "email_verified": claims.get("email_verified") is True}
+    except Exception:
+        return None
+
+
 def _verify_oidc(token: str) -> Optional[str]:
     import jwt
     try:
@@ -73,5 +90,14 @@ def _verify_oidc(token: str) -> Optional[str]:
         return None
 
 
+def verify_identity(token: str) -> Optional[dict]:
+    """Verified identity: {sub, email, email_verified}. Roles and tenant always come from server-side membership."""
+    if AUTH_MODE == "oidc" and AUTH_PROVIDER == "google":
+        return _verify_google(token)
+    sub = _verify_oidc(token) if AUTH_MODE == "oidc" else _verify_dev(token)
+    return {"sub": sub, "email": "", "email_verified": False} if sub else None
+
+
 def verify_token(token: str) -> Optional[str]:
-    return _verify_oidc(token) if AUTH_MODE == "oidc" else _verify_dev(token)
+    ident = verify_identity(token)
+    return ident["sub"] if ident else None

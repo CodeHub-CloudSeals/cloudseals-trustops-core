@@ -1,7 +1,7 @@
 PY=.venv/bin/python
 export PYTHONPATH=packages/question-engine:packages/reporting:apps/assessment-api:.
 
-.PHONY: dev seed test lint typecheck build demo
+.PHONY: dev seed test lint typecheck build demo agents
 dev:       ; $(PY) -m uvicorn app.main:app --app-dir apps/assessment-api --reload --port 8000
 seed:      ; $(PY) scripts/seed.py
 test:      ; $(PY) -m pytest -q --ignore=tests/browser
@@ -10,6 +10,7 @@ lint:      ; .venv/bin/ruff check .
 typecheck: ; .venv/bin/mypy --ignore-missing-imports packages/question-engine/question_engine packages/reporting/reporting
 build:     lint typecheck test ; $(PY) validate_registry.py
 demo:      ; $(PY) scripts/demo.py
+agents:    ; $(PY) scripts/run_agents.py
 
 .PHONY: tf-validate image
 tf-validate:

@@ -47,20 +47,46 @@ def bootstrap_first_admin(cognito_username: str, *, store: Store, cognito_client
     return sub
 
 
+def bootstrap_first_admin_by_sub(sub: str, *, store: Store) -> str:
+    """IdP-neutral bootstrap (GCP / any OIDC provider): the operator supplies the verified OIDC `sub` of the first admin."""
+    if ENV != "dev" or AUTH_MODE != "oidc":
+        raise RuntimeError("Bootstrap is allowed only in the OIDC-authenticated dev environment")
+    if not persist.enabled():
+        raise RuntimeError("A durable database is required; refusing to bootstrap ephemeral state")
+    if not sub or len(sub) > 256:
+        raise RuntimeError("A valid OIDC subject is required")
+    persist.load(store)
+    with store.lock:
+        if store.admin_bootstrap or any("cloudseals_admin" in u.get("roles", []) for u in store.users.values()):
+            raise RuntimeError("A CloudSeals admin bootstrap has already completed")
+        if sub in store.users:
+            raise RuntimeError("This identity already has a membership")
+        store.users[sub] = {"tenant_id": None, "roles": ["cloudseals_admin"]}
+        store.admin_bootstrap.update({"completed_at": time.time(), "sub": sub})
+        store.audit.append({"at": time.time(), "sub": sub, "tenant_id": None,
+                            "action": "admin.bootstrap", "ref": "first_cloudseals_admin"})
+        persist.save(store)
+    return sub
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bootstrap the first CloudSeals admin in AWS DEV.")
-    parser.add_argument("--cognito-username", required=True,
-                        help="Exact Cognito username for the pre-created, confirmed, email-verified operator")
+    who = parser.add_mutually_exclusive_group(required=True)
+    who.add_argument("--cognito-username", help="Exact Cognito username for the pre-created, confirmed, email-verified operator")
+    who.add_argument("--sub", help="OIDC subject (`sub` claim) of the first admin, for non-Cognito identity providers (GCP)")
     args = parser.parse_args()
     if not persist.enabled():
         raise SystemExit("Bootstrap refused: database persistence is not configured")
-    import boto3
 
     from .main import STORE
 
     try:
-        sub = bootstrap_first_admin(args.cognito_username, store=STORE,
-                                    cognito_client=boto3.client("cognito-idp"))
+        if args.sub:
+            sub = bootstrap_first_admin_by_sub(args.sub, store=STORE)
+        else:
+            import boto3
+            sub = bootstrap_first_admin(args.cognito_username, store=STORE,
+                                        cognito_client=boto3.client("cognito-idp"))
     except Exception as exc:
         raise SystemExit(f"Bootstrap refused: {exc}") from None
     print(f"First CloudSeals admin bootstrapped for Cognito sub {sub}.")

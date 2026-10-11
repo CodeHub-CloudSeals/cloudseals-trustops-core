@@ -53,3 +53,13 @@ def test_bootstrap_refuses_ephemeral_database(monkeypatch):
     monkeypatch.setattr(admin_bootstrap.persist, "enabled", lambda: False)
     with pytest.raises(RuntimeError, match="durable database"):
         admin_bootstrap.bootstrap_first_admin("operator", store=Store(), cognito_client=Cognito())
+
+
+def test_bootstrap_by_sub_for_non_cognito_idp(configured_bootstrap):
+    store = Store()
+    assert admin_bootstrap.bootstrap_first_admin_by_sub("gcp-sub-1", store=store) == "gcp-sub-1"
+    assert store.users["gcp-sub-1"]["roles"] == ["cloudseals_admin"]
+    with pytest.raises(RuntimeError, match="already completed"):
+        admin_bootstrap.bootstrap_first_admin_by_sub("gcp-sub-2", store=store)
+    with pytest.raises(RuntimeError, match="valid OIDC subject"):
+        admin_bootstrap.bootstrap_first_admin_by_sub("", store=Store())

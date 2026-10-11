@@ -85,3 +85,36 @@ def test_event_publish_failure_never_blocks(aws, monkeypatch):
     from app.main import emit
     assert emit("taad.assessment.submitted.v1", "t1", {})["publish_failed"] is True
     json.dumps({})
+
+
+def test_gcs_store_roundtrip_with_fake_client(monkeypatch):
+    from app.evidence import GCSObjectStore, make_store
+
+    blobs = {}
+
+    class Blob:
+        def __init__(self, name): self.name = name
+        def upload_from_string(self, data, content_type=None): blobs[self.name] = data
+        def download_as_bytes(self): return blobs[self.name]
+        def exists(self): return self.name in blobs
+        def delete(self): del blobs[self.name]
+
+    class Bucket:
+        def blob(self, name): return Blob(name)
+
+    class Client:
+        def bucket(self, name):
+            assert name == "evid"
+            return Bucket()
+
+    store = GCSObjectStore("evid", client=Client())
+    store.put("t1", "evidence", "k1", b"hello")
+    assert store.get("t1", "evidence", "k1") == b"hello" and "t1/evidence/k1" in blobs
+    store.delete("t1", "evidence", "k1")
+    assert not blobs
+    assert not hasattr(store, "promote") and not hasattr(store, "scan_status")  # direct-evidence path, no GuardDuty tags
+    monkeypatch.setenv("TAAD_OBJECT_BACKEND", "gcs")
+    monkeypatch.setenv("TAAD_BUCKET_EVID", "evid")
+    import google.cloud.storage as gcs
+    monkeypatch.setattr(gcs, "Client", lambda: Client())
+    assert isinstance(make_store(), GCSObjectStore)

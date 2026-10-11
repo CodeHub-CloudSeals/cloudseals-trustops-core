@@ -77,13 +77,13 @@ def test_login_create_answer_and_resume(page, base_url):
     page.get_by_role("button", name="Create assessment").click()
     expect(page.get_by_role("heading", name=re.compile("Browser test system"))).to_be_visible()
     # answer the first question of the first section through the UI
-    first = page.locator("div.card select").first
+    first = page.locator(".q-card select").first
     first.select_option(index=1)
-    expect(page.locator(".help", has_text="Saved (rev 1)").first).to_be_visible()
+    expect(page.locator(".q-status", has_text="Saved").first).to_be_visible()
     value = first.input_value()
     page.reload()
     page.wait_for_selector("h2")
-    expect(page.locator("div.card select").first).to_have_value(value)   # resumed from server
+    expect(page.locator(".q-card select").first).to_have_value(value)   # resumed from server
     expect(page.get_by_text("Required answers: 1 of")).to_be_visible()
 
 
@@ -186,7 +186,7 @@ def test_contributor_blocked_outside_assigned_sections(page, base_url, api):
                                                           "questionnaire_version": "1.0.0"})
     login(page, base_url, "contrib@t-bank")
     page.get_by_role("link", name="Assign system").click()
-    page.locator("div.card select").first.select_option(index=1)
+    page.locator(".q-card select").first.select_option(index=1)
     expect(page.locator("#toast", has_text="Section not assigned")).to_be_visible()
 
 
@@ -213,7 +213,7 @@ def test_mobile_layout_has_no_horizontal_scroll_and_accessible_names(page, base_
     login(page, base_url, "admin@t-bank")
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")   # list view (long names from other tests)
     page.get_by_role("link", name="Mobile system").click()
-    page.wait_for_selector("div.card select")
+    page.wait_for_selector(".q-card select")
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     unnamed = page.evaluate("""() => [...document.querySelectorAll('input:not([type=hidden]),select,textarea,button')]
         .filter(e => !(e.labels && e.labels.length) && !e.getAttribute('aria-label') && !e.textContent.trim() && !e.getAttribute('aria-labelledby')).length""")

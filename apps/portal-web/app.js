@@ -36,9 +36,22 @@ async function api(path, { method = "GET", body, headers = {}, raw = false, idem
   const r = await fetch(path, { method, headers: h, body: body === undefined ? undefined : body instanceof ArrayBuffer ? body : JSON.stringify(body) });
   if (raw) return r;
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) { const e = new Error(data.message || r.statusText); e.status = r.status; e.code = data.code; throw e; }
+  if (!r.ok) {
+    // An expired or revoked sign-in (Google ID tokens last one hour): return to the sign-in page instead of failing silently.
+    if (r.status === 401 && state.token && !path.startsWith("/v1/auth/")) { sessionStorage.removeItem("taad_token"); state.token = null; state.me = null; setTimeout(render, 0); }
+    const e = new Error(data.message || r.statusText); e.status = r.status; e.code = data.code; throw e;
+  }
   return data;
 }
+// Advisory agent output: always labelled, always plain text, never saved automatically.
+function advisoryBox(title, lines) {
+  return el("div", { class: "card advisory", role: "status" }, el("span", { class: "tag medium" }, "ADVISORY · NOT SAVED"), el("strong", {}, ` ${title}`),
+    el("ul", {}, lines.map((l) => el("li", {}, l))));
+}
+const agentButton = (label, out, run) => el("button", { class: "secondary", onclick: safe(async (e) => {
+  const b = e.currentTarget; b.disabled = true;
+  try { out.replaceChildren(await run()); } catch (err) { out.replaceChildren(el("p", { class: "help" }, `Agent unavailable: ${err.message}`)); } finally { b.disabled = false; }
+}) }, label);
 const safe = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message, true); } };
 
 // ---------- auth ----------
@@ -54,7 +67,7 @@ async function oidcLogin() {
   const challenge = b64u(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
   const st = b64u(crypto.getRandomValues(new Uint8Array(16)));
   sessionStorage.setItem("pkce", JSON.stringify({ verifier, st }));
-  location.href = `${o.authorize_url}?response_type=code&client_id=${encodeURIComponent(o.client_id)}&redirect_uri=${encodeURIComponent(o.redirect_uri)}&scope=${encodeURIComponent(o.scope)}&code_challenge=${challenge}&code_challenge_method=S256&state=${st}`;
+  location.href = `${o.authorize_url}?response_type=code&client_id=${encodeURIComponent(o.client_id)}&redirect_uri=${encodeURIComponent(o.redirect_uri)}&scope=${encodeURIComponent(o.scope)}&code_challenge=${challenge}&code_challenge_method=S256&state=${st}${o.provider === "google" ? "&prompt=select_account" : ""}`;
 }
 async function oidcCallback(params) {
   if (params.has("error") || !params.get("code")) {
@@ -102,7 +115,7 @@ async function loginView() {
     const o = state.cfg.oidc;
     const ready = [o.authorize_url, o.token_url, o.client_id, o.redirect_uri].every(Boolean);
     card.append(el("button", { class: "login-action", disabled: !ready, onclick: safe(oidcLogin) },
-      "Continue with organisation sign-in", el("span", { "aria-hidden": "true" }, "→")),
+      o.provider === "google" ? "Sign in with Google" : "Continue with organisation sign-in", el("span", { "aria-hidden": "true" }, "→")),
       ready ? "" : el("p", { class: "login-notice" }, "Secure sign-in is not configured yet. Contact your CloudSeals administrator."));
   } else {
     card.append(el("div", { class: "login-notice" },
@@ -164,23 +177,20 @@ async function render() {
     ...(hasAnyRole("cloudseals_admin") ? [["tenant-settings", "Tenant settings"]] : []),
   ];
   nav.replaceChildren(
-    link(["dashboard", "Command Center"]), link(["assessments", "Diagnosis"]), link(["trustops", "TrustOps"]),
+    link(["dashboard", "Command Center"]), link(["assessments", "Diagnosis"]), link(["use-cases", "Use cases"]), link(["trustops", "TrustOps"]), link(["agent-flow", "Agent Flow"]),
     canUseAdminMetrics ? link(["queue", "Review queue"]) : "",
     group("Operations", [["reconciliation", "Reconciliation"], ["exceptions", "Exceptions"], ["approvals", "Approvals"],
-      ["evidence", "Evidence"], ["readiness", "Readiness"], ["shadow-roi", "Shadow ROI"], ...(staff ? [] : [["team", "Team"]])]),
+      ["frameworks", "Frameworks"], ["evidence", "Evidence"], ["readiness", "Readiness"], ["shadow-roi", "Shadow ROI"], ...(staff ? [] : [["team", "Team"]])]),
     staff ? group("Administration", adminItems) : "");
   who.replaceChildren(state.cfg.mode === "dev"
-    ? el("span", { class: "tag" }, `${tenantLabel(state.me.tenant)} workspace`)
+    ? el("span", { class: "tag" }, state.me.tenant ? `${tenantLabel(state.me.tenant)} workspace` : "CloudSeals staff")
     : `${state.me.sub} `, state.cfg.mode === "dev" ? "" : el("button", { class: "secondary", onclick: logout }, "Sign out"));
   contextBar.replaceChildren(
     el("span", {}, el("small", {}, "TENANT"), state.me.tenant ? tenantLabel(state.me.tenant) : staff ? "CloudSeals operations" : "Customer workspace"),
     state.cfg.mode === "dev" ? "" : el("span", {}, el("small", {}, "ENVIRONMENT"), "OIDC session"),
-    el("span", {}, el("small", {}, "ENTITY SCOPE"), "Selected in assessment"),
     el("span", {}, el("small", {}, "ROLE"), state.me.roles.join(" · ")),
     el("span", {}, el("small", {}, "QUESTION CATALOG"), "v1.0.0 · 318 questions"),
-    el("span", {}, el("small", {}, "EVIDENCE INTEGRITY"), state.cfg.mode === "dev" ? "Local hash chain" : "Environment profile"),
-    el("span", {}, el("small", {}, "REGULATORY PACK"), "Not configured"),
-    el("span", {}, el("small", {}, "DATA REFRESH"), new Date().toLocaleTimeString()));
+    el("span", {}, el("small", {}, "EVIDENCE INTEGRITY"), state.cfg.mode === "dev" ? "Local hash chain" : "Environment profile"));
   contextBar.scrollLeft = 0;
   const view = routes[name] || routes.assessments;
   main.replaceChildren(el("p", {}, "Loading…"));
@@ -233,11 +243,16 @@ routes.assessment = async (aid) => {
       el("div", { class: "module-page-heading" }, el("span", { class: "eyebrow" }, "TAAD · ASSESSMENT WORKSPACE"), el("h2", {}, ctx.a.ai_system_name),
         el("p", {}, "Work through the assigned sections, save evidence-backed answers, and submit when required questions are complete."), el("span", { class: `tag ${frozen ? "ok" : "medium"}` }, ctx.a.status)),
       el("div", { class: "module-panel assessment-progress" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "QUESTIONNAIRE PROGRESS"), el("h3", {}, `${p.required_answered} of ${p.required_total} required answers`)), el("strong", {}, `${p.required_total ? Math.round(p.required_answered / p.required_total * 100) : 0}%`)), el("progress", { id: "pg", max: p.required_total || 1, value: p.required_answered })),
-      scopeBar(ctx, draw),
-      state.me.roles.some((role) => ["customer_admin", "customer_architect"].includes(role)) ? assignmentPanel(ctx, sections, draw) : "",
+      el("details", { class: "setup-panel" }, el("summary", {}, el("strong", {}, "Scope & team"), el("span", { class: "help" }, ctx.scopeType === "org" ? " Whole organisation · optional settings" : ` ${ctx.scopeType}: ${ctx.scopeId}`)),
+        scopeBar(ctx, draw),
+        state.me.roles.some((role) => ["customer_admin", "customer_architect"].includes(role)) ? assignmentPanel(ctx, sections, draw) : ""),
       el("div", { class: "layout" },
-        el("nav", { class: "sections", "aria-label": "Sections" }, sections.map((s) => el("button", { "aria-current": s === ctx.section, onclick: () => { ctx.section = s; draw(); } }, s))),
-        el("div", {}, qs.filter((q) => q.section === ctx.section).map((q) => questionCard(ctx, q, frozen, draw)))),
+        el("nav", { class: "sections", "aria-label": "Questionnaire sections" }, el("span", { class: "eyebrow" }, "SECTIONS"), sections.map((sec) => {
+          const inSec = qs.filter((q) => q.section === sec), done = inSec.filter((q) => ctx.answers[`${ctx.scopeId}|${q.question_id}`]).length;
+          return el("button", { "aria-current": sec === ctx.section, onclick: () => { ctx.section = sec; draw(); window.scrollTo({ top: 0 }); } },
+            el("span", {}, sec), el("small", { class: done === inSec.length ? "done" : "" }, done === inSec.length ? "✓" : `${done}/${inSec.length}`));
+        })),
+        el("div", { class: "questions" }, el("h3", { class: "section-title" }, ctx.section), qs.filter((q) => q.section === ctx.section).map((q, i) => questionCard(ctx, q, frozen, draw, i + 1)))),
       evidencePanel(ctx, draw),
       !frozen && !state.me.is_staff ? submitPanel(ctx, draw) : "",
       await reportsPanel(ctx, draw));
@@ -274,9 +289,9 @@ function scopeBar(ctx, draw) {
     el("div", {}, el("label", { for: "st" }, "Scope type"), t), el("div", {}, el("label", { for: "sn" }, "Scope name"), n), el("button", { class: "secondary" }, "Switch scope"));
 }
 
-function questionCard(ctx, q, frozen, draw) {
+function questionCard(ctx, q, frozen, draw, num = 0) {
   const key = `${ctx.scopeId}|${q.question_id}`, cur = ctx.answers[key];
-  const id = `q-${q.question_id}`, status = el("span", { class: "help", id: `${id}-s` }, cur ? `Saved (rev ${cur.revision})` : "Not answered");
+  const id = `q-${q.question_id}`, status = el("span", {}, cur ? `✓ Saved` : "Not answered yet");
   let input;
   const dis = frozen || (state.me.is_staff && false);
   if (q.response_type === "select_one") {
@@ -302,7 +317,7 @@ function questionCard(ctx, q, frozen, draw) {
       const data = await res.json();
       if (res.status === 409) { status.textContent = "Changed by someone else; reloading latest…"; say(status.textContent); return routes.assessment(ctx.aid); }
       if (!res.ok) throw new Error(data.message);
-      ctx.answers[key] = data; status.textContent = `Saved (rev ${data.revision})`; say(`Saved ${q.question_id}`);
+      ctx.answers[key] = data; status.textContent = "✓ Saved"; say(`Saved ${q.question_id}`);
       // Progress and conditional questions depend on persisted answers. Refresh after
       // each save so the submit gate and adaptive branches do not remain stale.
       await draw();
@@ -319,17 +334,33 @@ function questionCard(ctx, q, frozen, draw) {
   }) }, "Ask about this question");
   const swaskaDrawer = el("details", { class: "swaska-drawer" }, el("summary", {}, "Ask Swaska · question help"),
     el("p", { class: "help" }, "Swaska can explain this question and suggest evidence. Suggestions are not approvals."), swaskaPrompt, ask, swaskaOut);
-  return el("div", { class: "card" },
-    el("label", { for: id }, q.question, el("span", { class: "tag" }, q.required === "yes" ? "Required" : "Conditional"), el("span", { class: "tag" }, q.question_id)),
-    q.guidance ? el("div", { class: "help" }, q.guidance) : "", input,
-    el("div", { class: "row" }, el("label", { for: `${id}-u` }, unknown, " Unknown"), q.evidence_request ? el("span", { class: "help" }, `Evidence: ${q.evidence_request}`) : ""),
-    ctx.evidence.some((e) => e.state === "clean") ? ev : "", status, swaskaDrawer);
+  const answered = Boolean(cur);
+  return el("article", { class: `q-card ${answered ? "is-answered" : ""}` },
+    el("div", { class: "q-head" }, el("span", { class: "q-num" }, String(num)),
+      el("div", {}, el("label", { for: id, class: "q-title" }, q.question),
+        el("div", { class: "q-meta" }, el("span", { class: `tag ${q.required === "yes" ? "req" : ""}` }, q.required === "yes" ? "Required" : "If applicable"), el("span", { class: "q-id" }, q.question_id)),
+        q.guidance ? el("p", { class: "q-guidance" }, q.guidance) : "")),
+    el("div", { class: "q-input" }, input),
+    ctx.evidence.some((e) => e.state === "clean") ? el("div", { class: "q-evidence" }, el("span", { class: "help" }, "Attach evidence (optional)"), ev) : "",
+    el("div", { class: "q-foot" },
+      el("label", { class: "unknown-toggle", for: `${id}-u` }, unknown, el("span", {}, "I don't know")),
+      q.evidence_request ? el("span", { class: "help" }, `Helpful evidence: ${q.evidence_request}`) : "",
+      el("span", { class: `q-status ${answered ? "ok" : ""}`, id: `${id}-s` }, status)),
+    swaskaDrawer);
 }
 
 function evidencePanel(ctx, draw) {
-  const list = ctx.evidence.map((e) => el("li", {}, `${e.filename} - `, el("span", { class: `tag ${e.state === "clean" ? "ok" : "high"}` }, e.state), e.injection_flagged ? el("span", { class: "tag medium" }, "instruction-like text flagged") : ""));
+  const extractOut = el("div", { "aria-live": "polite" });
+  const extractable = (e) => e.state === "clean" && ["text/plain", "text/csv", "application/json"].includes(e.content_type);
+  const list = ctx.evidence.map((e) => el("li", {}, `${e.filename} - `, el("span", { class: `tag ${e.state === "clean" ? "ok" : "high"}` }, e.state), e.injection_flagged ? el("span", { class: "tag medium" }, "instruction-like text flagged") : "",
+    extractable(e) ? agentButton("Suggest answers from this file", extractOut, async () => {
+      const r = await api(`/v1/assessments/${ctx.aid}/agents/extraction`, { method: "POST", body: { evidence_id: e.evidence_id } });
+      return r.items.length ? advisoryBox(`Candidate answers (${r.mode}) - unverified, enter them yourself if correct`, r.items.map((i) => `${i.question_id}: ${i.candidate_value}  [source: "${i.excerpt}"]`))
+        : el("p", { class: "help" }, "No candidate answers found in this file.");
+    }) : ""));
   const f = el("input", { type: "file", id: "ef", accept: ".pdf,.txt,.csv,.json,.docx,.xlsx" });
-  return el("section", { class: "card" }, el("h3", {}, "Evidence (quarantined and scanned before use)"), list.length ? el("ul", {}, list) : el("p", { class: "help" }, "No files uploaded."),
+  return el("section", { class: "card" }, el("h3", {}, "Evidence (quarantined and scanned before use)"), list.length ? el("ul", {}, list) : el("p", { class: "help" }, "No files uploaded."), extractOut,
+    el("p", { class: "help" }, "Documents (PDF, Word, text) can also be read for the AI use cases they describe: ", el("a", { href: `#/use-cases/${ctx.aid}` }, "open AI use cases →")),
     el("label", { for: "ef" }, "Upload a document"), f,
     el("p", {}, el("button", { onclick: safe(async () => {
       const file = f.files[0]; if (!file) return toast("Choose a file first", true);
@@ -447,7 +478,7 @@ routes.trustops = async (selectedRunId) => {
       invoices, remittance: { reference: remittance } };
   };
   const flow = el("section", { class: "trustops-flow is-ready", role: "status", "aria-live": "polite", "aria-busy": "false" });
-  const isBedrock = overview.agent_mode === "bedrock_configured";
+  const isBedrock = String(overview.agent_mode).endsWith("_configured");
   const flowNames = ["Intake", "Match", "Reconciliation", "Cash Allocation", "Exception", "Audit"];
   const drawFlow = (mode) => {
     const running = mode === "running";
@@ -504,14 +535,15 @@ routes.trustops = async (selectedRunId) => {
     const trace = (run.agent_trace || []).map((step, index) => {
       const rec = step.recommendation || {};
       const name = step.agent_id.split(".").at(-1).replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
-      const statusLabel = ({ completed: "Completed", routed: "Sent for review", no_action: "No action", failed: "Failed", evidence_manifest_created: "Recorded" })[step.status] || step.status.replaceAll("_", " ");
+      const statusLabel = ({ completed: "Completed", routed: "Sent for review", no_action: "No action", failed: "Failed", evidence_manifest_created: "Recorded", proposal_created: "Proposal ready", not_required: "Not needed" })[step.status] || step.status.replaceAll("_", " ");
       const specifics = [rec.rationale || rec.explanation || rec.summary,
         rec.selected_invoice_id ? `Selected invoice ${rec.selected_invoice_id}.` : "",
         step.candidate_ids?.length ? `Candidate invoices: ${step.candidate_ids.join(", ")}.` : "",
         step.classification || step.reason_code ? `Decision: ${(step.classification || step.reason_code).replaceAll("_", " ")}.` : ""]
         .filter(Boolean).join(" ");
       const fallback = ({ intake: "Payment details were validated for this workflow.",
-        cash_allocation: "No allocation was proposed for this run.", exception: "This case was routed for human review.",
+        cash_allocation: step.status === "proposal_created" ? "A cash allocation proposal was prepared for review." : "No allocation was proposed for this run.",
+        exception: step.status === "routed" ? "This case was sent to the exception queue for human review." : "No exception: this case is within policy.",
         audit: "The workflow evidence record was created." })[name.toLowerCase().replaceAll(" ", "_")] || "The workflow step completed.";
       const stateClass = ["completed", "routed", "evidence_manifest_created"].includes(step.status) ? "trace-status-ok"
         : ["failed", "no_action"].includes(step.status) ? "trace-status-review" : "";
@@ -535,7 +567,8 @@ routes.trustops = async (selectedRunId) => {
     const actions = [];
     if (run.status === "approval_required" && canApprove) {
       const reason = el("input", { "aria-label": "Controller decision reason", placeholder: "Reason required", maxlength: 2000 });
-      actions.push(el("section", { class: "card" }, el("h3", {}, "Controller approval"),
+      const sumOut = el("div", { "aria-live": "polite" });
+      actions.push(el("section", { class: "card" }, el("h3", {}, "Controller approval"), agentButton("Summarise for approver (advisory)", sumOut, () => approvalSummary(run.run_id)), sumOut,
         el("p", { class: "help" }, "A different customer_controller must approve. The API enforces maker-checker separation."), reason,
         el("div", { class: "row" }, el("button", { onclick: safe(async () => {
           if (!reason.value.trim()) return toast("Enter an approval reason", true);
@@ -615,7 +648,7 @@ routes.trustops = async (selectedRunId) => {
         el("span", { class: "pack-pill" }, `${overview.workflow_pack} · v${overview.workflow_version}`))),
     el("section", { class: `runtime-notice ${isSandbox ? "notice-sandbox" : "notice-unavailable"}`, role: "status" },
       el("span", { class: "notice-mark", "aria-hidden": "true" }, "i"),
-      el("p", {}, isSandbox ? (overview.agent_mode === "bedrock_configured"
+      el("p", {}, isSandbox ? (String(overview.agent_mode).endsWith("_configured")
         ? "AI-assisted recommendations are checked against workflow policy before an action can be prepared. Every step is recorded for review."
         : "Matching and policy decisions follow defined workflow rules. Ambiguous cases are routed to authorized reviewers, and each step is traceable.")
         : "Workflow execution is unavailable in this environment. You can still review registered agents and available run traces.")),
@@ -679,11 +712,13 @@ routes.dashboard = async () => {
   const cards = [
     moduleCard("LedgerSight AR / Cash", "Review payments, match invoices and create a governed cash application outcome.", "SANDBOX WORKFLOW", "trustops", "module-card-primary"),
     moduleCard("AI Architecture Diagnosis", "Assess systems, answer the versioned questionnaire, attach evidence and review published reports.", "ASSESSMENTS", "assessments"),
+    moduleCard("AI Use Cases", "Read your documents, list the AI use cases they evidence and review each one before any analysis.", "DOCUMENT AGENT", "use-cases"),
     moduleCard("Reconciliation", "Inspect receipt matches, allocation proposals and policy outcomes.", "LIVE RUN DATA", "reconciliation"),
     moduleCard("Exceptions", "Review ambiguous matches, escalations and rejected workflow actions.", "LIVE RUN DATA", "exceptions"),
     moduleCard("Approvals", "Handle controller decisions with maker-checker separation.", "ROLE-GATED", "approvals"),
-    moduleCard("Evidence Fabric", "Review run evidence and verify the local integrity chain.", "LOCAL HASH CHAIN", "evidence"),
+    moduleCard("Evidence Fabric", "Review run evidence and verify its integrity chain and signatures.", "TAMPER-EVIDENT", "evidence"),
     moduleCard("Readiness", "Track assessment completion and reviewer-approved reports.", "ASSESSMENT STATUS", "readiness"),
+    moduleCard("Frameworks", "EU AI Act, ISO 42001, NIST AI RMF, SR 11-7 and FDA SaMD reference requirements and controls.", "REFERENCE LIBRARY", "frameworks"),
     moduleCard("Shadow ROI", "ROI measurement is unavailable until baseline and cost telemetry are configured.", "NOT CONFIGURED", "shadow-roi"),
   ];
   const metrics = staffMetrics
@@ -737,6 +772,11 @@ routes.exceptions = async () => {
       exceptions.length ? runTable(exceptions) : el("p", { class: "empty-state" }, "No exceptions are recorded."))));
 };
 
+async function approvalSummary(runId) {
+  const r = await api(`/v1/runs/${runId}/approval-summary`);
+  return advisoryBox(`Approval summary (${r.mode}) - the policy decision is unchanged`, [r.summary, r.decision_reason, r.uncertainty]);
+}
+
 routes.approvals = async () => {
   const { items } = await api("/v1/runs?limit=100");
   const pending = items.filter((r) => r.status === "approval_required");
@@ -748,8 +788,10 @@ routes.approvals = async () => {
       await api(`/v1/approvals/${run.run_id}/decision`, { method: "POST", idem: true, body: { decision, reason: reason.value.trim() } });
       toast(`Approval ${decision} recorded`); await routes.approvals();
     });
+    const sumOut = el("div", { "aria-live": "polite" });
     return el("article", { class: "approval-card" }, el("div", {}, el("span", { class: "eyebrow" }, "PENDING CONTROLLER REVIEW"), el("h3", {}, run.receipt_id),
-      el("p", {}, `${run.currency} ${(run.amount_minor / 100).toFixed(2)} · ${run.policy_decision?.reason_code || "Approval required"}`), openRunLink(run)),
+      el("p", {}, `${run.currency} ${(run.amount_minor / 100).toFixed(2)} · ${run.policy_decision?.reason_code || "Approval required"}`), openRunLink(run),
+      agentButton("Summarise for approver (advisory)", sumOut, () => approvalSummary(run.run_id)), sumOut),
       canApprove ? el("div", {}, reason, el("div", { class: "row" }, el("button", { onclick: decide("approve") }, "Approve"), el("button", { class: "danger", onclick: decide("reject") }, "Reject")))
         : el("p", { class: "module-note" }, "Controller role required. The workflow initiator cannot approve their own action."));
   });
@@ -834,8 +876,13 @@ routes.workflows = async () => {
 };
 
 routes.agents = async () => {
-  const overview = await api("/v1/agentops");
+  const [overview, advisory] = await Promise.all([api("/v1/agentops"), api("/v1/agents")]);
   main.replaceChildren(moduleFrame("ADMINISTRATION · AGENT REGISTRY", "Agents", "Registered specialists, their responsibilities and their permitted authority.",
+    el("section", { class: "module-card-grid agent-registry-grid" }, advisory.items.map((agent, index) => el("article", { class: "module-panel" },
+      el("span", { class: "module-card-status" }, `ADVISORY ${String(index + 1).padStart(2, "0")} · v${agent.version} · READ ONLY`),
+      el("h3", {}, agent.agent_id.split(".").at(-1).replaceAll("_", " ")), el("p", {}, agent.purpose),
+      el("div", { class: "permission-list" }, agent.approved_capabilities.map((c) => el("span", { class: "permission-chip" }, c))),
+      el("p", { class: "module-note" }, `Fallback: ${agent.fallback}`)))),
     el("section", { class: "module-card-grid agent-registry-grid" }, overview.agents.map((agent, index) => el("article", { class: "module-panel" },
       el("span", { class: "module-card-status" }, `AGENT ${String(index + 1).padStart(2, "0")} · v${agent.version}`),
       el("h3", {}, agent.id.split(".").at(-1).replaceAll("_", " ")), el("p", {}, agent.purpose),
@@ -844,9 +891,9 @@ routes.agents = async () => {
 
 routes.models = async () => {
   const overview = await api("/v1/agentops");
-  const configured = overview.agent_mode === "bedrock_configured";
+  const configured = String(overview.agent_mode).endsWith("_configured");
   main.replaceChildren(moduleFrame("ADMINISTRATION · MODEL ROUTING", "Models", "Model reasoning is advisory; deterministic policy controls action authority.",
-    el("section", { class: "module-card-grid" }, moduleCard(configured ? "Amazon Bedrock" : "Deterministic reference mode",
+    el("section", { class: "module-card-grid" }, moduleCard(configured ? (overview.agent_mode.startsWith("vertex") ? "Google Vertex AI (Gemini)" : "Amazon Bedrock") : "Deterministic reference mode",
       configured ? `Configured route: ${overview.model_id}.` : "No model route is configured. Agent roles use deterministic local logic.", configured ? "CONFIGURED" : "ACTIVE"),
       moduleCard("Cost and latency metering", "Per-call token, latency and cost telemetry are not available in this environment.", "NOT INSTRUMENTED"))));
 };
@@ -924,7 +971,11 @@ async function reviewPanel(ctx, r, draw) {
   const adjust = (f) => { const s = el("select", { "aria-label": `Status for ${f.rule_id}`, disabled: published }, ["Confirmed gap", "Potential gap", "No gap evidenced", "Not applicable"].map((o) => el("option", { value: o, selected: o === f.status }, o)));
     s.addEventListener("change", safe(async () => { if (!reason.value.trim()) { toast("Enter a reviewer reason first", true); s.value = f.status; return; } await api(`/v1/assessments/${ctx.aid}/findings/${f.rule_id}/review`, { method: "POST", body: { status: s.value, reason: reason.value } }); toast("Finding updated"); draw(); })); return s; };
   const decide = (d) => safe(async () => { if (!reason.value.trim()) return toast("Enter a reviewer reason", true); await api(`/v1/assessments/${ctx.aid}/reviews/${r.report_id}/decision`, { method: "POST", idem: true, body: { decision: d, reviewer_reason: reason.value } }); toast(`Decision recorded: ${d}`); draw(); });
-  const kids = [findingsTable(items, adjust)];
+  const sumOut = el("div", { "aria-live": "polite" });
+  const kids = [findingsTable(items, adjust), agentButton("Summarise findings (advisory)", sumOut, async () => {
+    const r = await api(`/v1/assessments/${ctx.aid}/agents/findings-summary`, { method: "POST" });
+    return advisoryBox(`Findings summary (${r.mode})`, r.items.map((i) => `${i.rule_id}: ${i.summary} (${i.uncertainty})`));
+  }), sumOut];
   if (state.me.roles.includes("cloudseals_reviewer") && !published) kids.push(el("label", { for: reason.id }, "Reviewer reason"), reason,
     el("div", { class: "row" }, el("button", { onclick: decide("approve") }, "Approve & publish"), el("button", { class: "secondary", onclick: decide("request_clarification") }, "Request clarification"), el("button", { class: "danger", onclick: decide("reject") }, "Reject")));
   if (published && state.me.roles.some((x) => ["cloudseals_admin", "cloudseals_assessor"].includes(x))) kids.push(blueprintForm(ctx, r));
@@ -932,13 +983,21 @@ async function reviewPanel(ctx, r, draw) {
 }
 
 function blueprintForm(ctx, r) {
+  const notesOut = el("div", { "aria-live": "polite" });
   const f = el("form", { onsubmit: safe(async (e) => { e.preventDefault(); const d = new FormData(f);
-    const bp = await api(`/v1/assessments/${ctx.aid}/poc-blueprints`, { method: "POST", idem: true, body: { report_id: r.report_id, workflow_pack_id: d.get("wp"), customer_security_signoff_ref: d.get("cs"), cloudseals_architect_signoff_ref: d.get("ca") } });
-    toast(`Draft blueprint ${bp.blueprint_id.slice(0, 8)} created (runtime blocked)`); }) },
+    const criteria = String(d.get("sc") || "").split("\n").map((x) => x.trim()).filter(Boolean);
+    const bp = await api(`/v1/assessments/${ctx.aid}/poc-blueprints`, { method: "POST", idem: true, body: { report_id: r.report_id, workflow_pack_id: d.get("wp"), customer_security_signoff_ref: d.get("cs"), cloudseals_architect_signoff_ref: d.get("ca"), success_criteria: criteria } });
+    toast(`Draft blueprint ${bp.blueprint_id.slice(0, 8)} created (runtime blocked)`);
+    notesOut.replaceChildren(agentButton("Draft scope notes (advisory)", notesOut, async () => {
+      const n = await api(`/v1/assessments/${ctx.aid}/poc-blueprints/${bp.blueprint_id}/draft-notes`, { method: "POST" });
+      return advisoryBox(`POC draft notes (${n.mode})`, [n.scope_summary, ...n.open_questions.map((q) => `Open question: ${q}`), n.uncertainty]);
+    })); }) },
   el("h3", {}, "Draft POC blueprint"), el("p", { class: "help" }, "Draft only. Runtime activation and credentials need a separate approval."),
   el("label", { for: "wp" }, "Workflow pack ID"), el("input", { id: "wp", name: "wp", required: true }),
   el("label", { for: "cs" }, "Customer security sign-off ref"), el("input", { id: "cs", name: "cs" }),
-  el("label", { for: "ca" }, "CloudSeals architect sign-off ref"), el("input", { id: "ca", name: "ca" }), el("p", {}, el("button", {}, "Create draft blueprint")));
+  el("label", { for: "ca" }, "CloudSeals architect sign-off ref"), el("input", { id: "ca", name: "ca" }),
+  el("label", { for: "sc" }, "Success criteria (one per line, at least one)"), el("textarea", { id: "sc", name: "sc", rows: 3, required: true }),
+  el("p", {}, el("button", {}, "Create draft blueprint")), notesOut);
   return f;
 }
 
@@ -1003,6 +1062,305 @@ routes.activity = async () => {
     : el("p", { class: "empty-state" }, "No activity has been recorded.");
   main.replaceChildren(moduleFrame("CLOUDSEALS · AUDIT", "Activity", "Administrative and assessment events recorded by this environment.",
     el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "RECENT EVENTS"), el("h3", {}, `${items.length} events`))), content)));
+};
+
+
+// ---------- Agent Flow: watch the agents run, step by step ----------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const FLOW_NODES = {
+  payment: [["ledgersight.intake", "Intake", "Checks the payment data and fingerprints it"],
+    ["ledgersight.match", "Match", "Finds candidate invoices for the payment"],
+    ["ledgersight.reconciliation", "Reconciliation", "Explains amount and reference differences"],
+    ["ledgersight.cash_allocation", "Cash Allocation", "Recommends a bounded allocation proposal"],
+    ["ledgersight.exception", "Exception", "Sends unresolved cases to a human"],
+    ["ledgersight.audit", "Audit", "Creates the evidence record"],
+    ["trustops.approval_summarizer", "Approval Summary", "Summarises the decision for the approver"]],
+  diagnosis: [["cloudseals.swaska.diagnostic_interviewer", "Interviewer", "Asks one clarifying question about an assessment question"],
+    ["cloudseals.swaska.evidence_extractor", "Evidence Extractor", "Suggests candidate answers from uploaded evidence"],
+    ["trustops.inventory_agent", "Inventory Agent", "Reads documents and lists the AI use cases they evidence"],
+    ["cloudseals.swaska.findings_summarizer", "Findings Summary", "Summarises candidate findings for reviewers"],
+    ["trustops.gap_analysis_agent", "Gap Analysis", "Compares validated use cases with a framework"],
+    ["cloudseals.swaska.poc_drafter", "POC Drafter", "Drafts scope notes for the POC blueprint"]],
+};
+const FLOW_STATE = { waiting: "Waiting", running: "Running…", done: "Done", skipped: "Skipped", failed: "Failed" };
+const PRESETS = { low: "Low value, exact match", high: "High value (needs approval)", ambiguous: "Ambiguous (two matches)", nomatch: "No matching invoice" };
+function paymentBody(preset) {
+  const id = String(Date.now()).slice(-8), ref = `INV-${id}`, inv = (n, amount, reference) => ({ invoice_id: `I-${id}-${n}`, amount_minor: amount, currency: "USD", reference });
+  const amount = preset === "high" ? 999999999 : 25000;
+  const invoices = preset === "ambiguous" ? [inv(1, amount, ref), inv(2, amount, ref)] : preset === "nomatch" ? [inv(1, amount + 100, `OTHER-${id}`)] : [inv(1, amount, ref)];
+  return { receipt: { receipt_id: `R-${id}`, amount_minor: amount, currency: "USD", reference: ref }, invoices, remittance: { reference: ref } };
+}
+function describeStep(step) {
+  const rec = step.recommendation || {}, lines = [];
+  if (step.candidate_ids) lines.push(`Candidate invoices: ${step.candidate_ids.length ? step.candidate_ids.join(", ") : "none"}`);
+  if (step.classification) lines.push(`Result: ${step.classification.replaceAll("_", " ")}`);
+  if (step.proposal) lines.push(`Proposal: allocate ${step.proposal.amount_minor / 100} ${step.proposal.currency} to invoice ${step.proposal.invoice_id}`);
+  if (step.exception) lines.push(`Sent to ${step.exception.queue.replaceAll("_", " ")}: ${step.exception.reason_code.replaceAll("_", " ").toLowerCase()}`);
+  if (step.input_digest) lines.push(`Input fingerprint: ${step.input_digest.slice(0, 16)}…`);
+  for (const t of [rec.rationale, rec.explanation, rec.summary]) if (t) lines.push(t);
+  return lines.length ? lines : [`Status: ${step.status.replaceAll("_", " ")}`];
+}
+
+// CSP forbids inline style attributes; setting the width through the CSSOM is allowed.
+function progressFill(pct) { const f = el("div", { class: "af-progress-bar", role: "presentation" }); f.style.width = `${pct}%`; return f; }
+const CAPTIONS = {
+  "ledgersight.intake": ["Reading the receipt…", "Checking amount and currency…", "Fingerprinting the input…"],
+  "ledgersight.match": ["Scanning candidate invoices…", "Comparing reference, amount and currency…", "Shortlisting matches…"],
+  "ledgersight.reconciliation": ["Comparing the normalised values…", "Explaining any differences…"],
+  "ledgersight.cash_allocation": ["Checking the policy gate…", "Preparing a bounded proposal…"],
+  "ledgersight.exception": ["Checking whether a human is needed…", "Choosing the review queue…"],
+  "ledgersight.audit": ["Collecting evidence references…", "Hashing the evidence record…"],
+  "trustops.approval_summarizer": ["Reading the policy decision…", "Writing the approver summary…"],
+  "cloudseals.swaska.diagnostic_interviewer": ["Reading the question…", "Drafting one clarifying question…"],
+  "cloudseals.swaska.evidence_extractor": ["Reading the evidence file…", "Looking for answer candidates…", "Quoting the source lines…"],
+  "cloudseals.swaska.findings_summarizer": ["Reading candidate findings…", "Writing reviewer summaries…"],
+  "trustops.inventory_agent": ["Reading the documents…", "Listing AI use cases…", "Checking every quote against the text…"],
+  "trustops.gap_analysis_agent": ["Reading validated use cases…", "Comparing with framework requirements…", "Citing requirement IDs…"],
+  "cloudseals.swaska.poc_drafter": ["Reading the draft blueprint…", "Writing scope notes…"],
+};
+
+routes["agent-flow"] = async () => {
+  const roles = state.me.roles;
+  const [{ items: assessments }, overview] = await Promise.all([api("/v1/assessments"), api("/v1/agentops")]);
+  const runtimeUp = overview.mode === "sandbox";
+  let flow = runtimeUp ? "payment" : "diagnosis", preset = "low", running = false, assessmentId = assessments[0]?.assessment_id || "", nodes = [], summary = null, current = -1;
+  const reset = () => { nodes = FLOW_NODES[flow].map(([id, name, does]) => ({ id, name, does, state: "waiting", lines: [], ms: null, caption: "" })); summary = null; current = -1; };
+  reset();
+  const note = el("p", { class: "module-note" });
+  const stage = el("div", { class: "af-stage", "aria-hidden": "true" }), bubble = el("div", { class: "af-bubble", "aria-live": "polite" });
+  const list = el("ol", { class: "af-list" }), banner = el("div", { class: "af-banner" }), controls = el("div", { class: "af-controls" });
+  const initials = (n) => n.name.split(" ").map((w) => w[0]).join("").slice(0, 2);
+  const draw = () => {
+    const done = nodes.filter((n) => ["done", "skipped", "failed"].includes(n.state)).length;
+    note.textContent = flow === "payment"
+      ? "Sandbox only: nothing is written to a real ERP. The workflow runs once on the server; each agent's real output is then shown in turn, and the activity text describes what that agent does."
+      : "Each agent is a separate real call. Agents you cannot use, or that have nothing to work on yet, are marked Skipped with the reason. Output is advisory and never saved as an answer.";
+    banner.replaceChildren(el("div", { class: "af-progress" }, progressFill(Math.round(done / nodes.length * 100))),
+      el("span", {}, running ? `Running… ${done} of ${nodes.length} agents finished` : done ? `${done} of ${nodes.length} agents finished` : "Choose a flow and press Run"), summary || "");
+    const parts = [];
+    nodes.forEach((n, i) => {
+      parts.push(el("div", { class: `af-agent is-${n.state}` }, el("div", { class: "af-orb" }, el("span", {}, n.state === "done" ? "✓" : n.state === "failed" ? "!" : n.state === "skipped" ? "–" : initials(n))), el("small", {}, n.name)));
+      if (i < nodes.length - 1) parts.push(el("div", { class: `af-link ${nodes[i + 1].state !== "waiting" ? "is-done" : n.state === "done" ? "is-travel" : ""}` }, el("i", {})));
+    });
+    stage.replaceChildren(...parts);
+    const cur = nodes[current];
+    bubble.replaceChildren(cur && cur.state === "running" ? el("div", { class: "af-thinking" }, el("span", { class: "af-dots" }, el("i", {}), el("i", {}), el("i", {})), el("strong", {}, `${cur.name} `), cur.caption)
+      : cur && cur.lines.length ? el("div", { class: "af-said" }, el("strong", {}, `${cur.name}: `), cur.lines[0]) : el("span", { class: "help" }, running ? "" : "The active agent will show what it is doing here."));
+    list.replaceChildren(...nodes.map((n, i) => el("li", { class: `af-node is-${n.state}` },
+      el("span", { class: "af-dot", "aria-hidden": "true" }, n.state === "done" ? "✓" : n.state === "failed" ? "!" : n.state === "skipped" ? "–" : String(i + 1)),
+      el("div", { class: "af-card" }, el("div", { class: "af-card-head" }, el("strong", {}, n.name), el("span", { class: `af-chip ${n.state}` }, n.state === "running" ? el("span", { class: "spin", "aria-hidden": "true" }) : "", FLOW_STATE[n.state]),
+        n.ms != null ? el("small", {}, `${n.ms} ms`) : ""), el("p", {}, n.does),
+        n.lines.length ? el("ul", { class: "af-out" }, n.lines.map((l) => el("li", {}, l))) : ""))));
+  };
+  const set = (i, patch) => { Object.assign(nodes[i], patch); draw(); };
+  const skip = (i, why) => { current = i; set(i, { state: "skipped", lines: [why] }); };
+  // One agent "works": status + rotating activity captions while the task runs, then its real output appears.
+  async function act(i, task, { real = true, minMs = 1700 } = {}) {
+    current = i; const caps = CAPTIONS[nodes[i].id] || ["Working…"]; let c = 0;
+    set(i, { state: "running", lines: [], caption: caps[0] });
+    const tick = setInterval(() => { c = (c + 1) % caps.length; set(i, { caption: caps[c] }); }, Math.max(500, minMs / caps.length));
+    const t = performance.now();
+    try {
+      const [res] = await Promise.all([task(), sleep(minMs)]);
+      set(i, { ms: real ? Math.round(performance.now() - t - 0) : null, ...res });
+    } catch (e) {
+      set(i, { state: e.status === 403 ? "skipped" : "failed", lines: [e.status === 403 ? "Your role does not have access to this agent." : e.message] });
+    } finally { clearInterval(tick); }
+    await sleep(700); // the result travels to the next agent
+  }
+
+  async function runPayment() {
+    let run, reqErr;
+    const req = api("/v1/workflows/ledgersight.ar_cash/runs", { method: "POST", idem: true, body: paymentBody(preset) }).then((r) => { run = r; }, (e) => { reqErr = e; });
+    for (let i = 0; i < 6; i++) {
+      await act(i, async () => { await req; if (reqErr) throw reqErr; const step = run.agent_trace[i]; return { state: step.status === "failed" ? "failed" : "done", lines: describeStep(step) }; }, { real: false });
+      if (reqErr) { nodes.slice(i + 1).forEach((_, k) => skip(i + 1 + k, "Not started because the workflow failed.")); return; }
+    }
+    await act(6, async () => {
+      const r = await api(`/v1/runs/${run.run_id}/approval-summary`);
+      return { state: "done", lines: [r.summary, r.decision_reason, `Mode: ${r.mode}`] };
+    });
+    const pd = run.policy_decision;
+    summary = el("div", { class: "af-result" }, el("strong", {}, `Policy decision: ${pd.decision}`), ` · ${pd.reason_code.replaceAll("_", " ").toLowerCase()} · `,
+      el("a", { href: `#/trustops/${run.run_id}` }, "Open full run →"));
+  }
+
+  async function runDiagnosis() {
+    if (!assessmentId) { nodes.forEach((_, i) => skip(i, "No assessment is available in this workspace yet.")); return; }
+    const staffReview = roles.some((r) => ["cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer"].includes(r));
+    await act(0, async () => {
+      const r = await api(`/v1/assessments/${assessmentId}/swaska/turns`, { method: "POST", body: { scope_id: "org", user_message: "What evidence would help here?", parent_question_id: "Q-BASE-006" } });
+      return { state: "done", lines: [r.clarification_text, r.needs_evidence ? `Suggested evidence: ${r.evidence_type}` : "No evidence needed", r.uncertainty] };
+    });
+    const files = (await api(`/v1/assessments/${assessmentId}/evidence`)).items.filter((e) => e.state === "clean");
+    const evid = files.find((e) => ["text/plain", "text/csv", "application/json"].includes(e.content_type));
+    if (!evid) skip(1, "No clean text, CSV or JSON evidence uploaded yet.");
+    else await act(1, async () => {
+      const r = await api(`/v1/assessments/${assessmentId}/agents/extraction`, { method: "POST", body: { evidence_id: evid.evidence_id } });
+      return { state: "done", lines: r.items.length ? r.items.map((c) => `${c.question_id}: ${c.candidate_value} (unverified)`) : [`No candidate answers found in ${evid.filename}`] };
+    });
+    const readable = files.filter((e) => ["application/pdf", "text/plain", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"].includes(e.content_type));
+    if (!readable.length) skip(2, "No clean PDF, Word or text document uploaded yet.");
+    else await act(2, async () => {
+      const r = await api(`/v1/assessments/${assessmentId}/inventory/run`, { method: "POST", body: {} });
+      if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
+      return { state: "done", lines: r.items.length ? r.items.map((u) => `${u.name} · ${TIER_LABEL[u.risk_tier]} · ${Math.round(u.extraction_confidence * 100)}% confidence (needs review)`) : ["No AI use cases were evidenced in the documents."] };
+    }, { minMs: 2200 });
+    if (!staffReview) skip(3, "Needs a CloudSeals reviewer. Customers do not see findings before review.");
+    else await act(3, async () => {
+      const r = await api(`/v1/assessments/${assessmentId}/agents/findings-summary`, { method: "POST" });
+      return r.items.length ? { state: "done", lines: r.items.map((f) => f.summary) } : { state: "skipped", lines: ["No findings yet. The customer must submit the assessment first."] };
+    });
+    if (!staffReview) skip(4, "Needs a CloudSeals reviewer to validate use cases and run the analysis.");
+    else {
+      const validated = (await api(`/v1/assessments/${assessmentId}/inventory`)).use_cases.filter((u) => u.status === "VALIDATED");
+      if (!validated.length) skip(4, "No validated use cases yet. A reviewer validates them on the AI use cases page first.");
+      else await act(4, async () => {
+        const r = await api(`/v1/assessments/${assessmentId}/gap-analysis/run`, { method: "POST", body: { framework_id: "eu_ai_act" } });
+        if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
+        return { state: "done", lines: r.items.length ? r.items.slice(0, 5).map((g) => `${g.severity.toUpperCase()} · ${g.framework_clause.replaceAll("_", " ")}: ${g.title}`) : ["No gaps were raised against the EU AI Act."] };
+      }, { minMs: 2200 });
+    }
+    if (!roles.some((r) => ["cloudseals_admin", "cloudseals_assessor"].includes(r))) skip(5, "Needs a CloudSeals assessor, after a reviewer has approved the report.");
+    else {
+      const bp = (await api(`/v1/assessments/${assessmentId}/poc-blueprints`)).items[0];
+      if (!bp) skip(5, "No draft POC blueprint yet. An assessor creates one from the approved report.");
+      else await act(5, async () => {
+        const r = await api(`/v1/assessments/${assessmentId}/poc-blueprints/${bp.blueprint_id}/draft-notes`, { method: "POST" });
+        return { state: "done", lines: [r.scope_summary, ...r.open_questions.map((q) => `Open question: ${q}`)] };
+      });
+    }
+  }
+
+  const runBtn = el("button", { onclick: safe(async () => {
+    if (running) return; running = true; reset(); drawControls(); draw();
+    try { await (flow === "payment" ? runPayment() : runDiagnosis()); } finally { running = false; drawControls(); draw(); }
+  }) }, "▶ Run agents");
+  function drawControls() {
+    runBtn.disabled = running;
+    const tab = (id, label) => el("button", { class: flow === id ? "" : "secondary", disabled: running || (id === "payment" && !runtimeUp), title: id === "payment" && !runtimeUp ? "The governed workflow runtime is not enabled in this environment" : null, onclick: () => { flow = id; reset(); drawControls(); draw(); } }, label);
+    const picker = flow === "payment"
+      ? el("label", {}, "Scenario", el("select", { disabled: running, onchange: (e) => { preset = e.target.value; } }, Object.entries(PRESETS).map(([v, l]) => el("option", { value: v, selected: v === preset }, l))))
+      : el("label", {}, "Assessment", el("select", { disabled: running, onchange: (e) => { assessmentId = e.target.value; } },
+        assessments.length ? assessments.map((a) => el("option", { value: a.assessment_id, selected: a.assessment_id === assessmentId }, `${a.ai_system_name} (${a.status})`)) : el("option", { value: "" }, "No assessments")));
+    const demo = flow === "diagnosis" && !assessments.length && state.cfg.mode === "dev" ? el("button", { class: "secondary", disabled: running, onclick: safe(async () => {
+      const a = await api("/v1/assessments", { method: "POST", idem: true, body: { ai_system_name: "Demo credit agent", industry: "banking", questionnaire_version: "1.0.0" } });
+      const data = new TextEncoder().encode("Q-BASE-006: Yes\nQ-IAM-002: Yes\n");
+      const g = await api(`/v1/assessments/${a.assessment_id}/evidence/upload-url`, { method: "POST", body: { filename: "architecture-notes.txt", content_type: "text/plain", file_size_bytes: data.byteLength, claimed_sha256: await sha256Hex(data.buffer) } });
+      await api(g.upload_url, { method: "PUT", body: data.buffer, headers: { "Content-Type": "application/octet-stream" } });
+      toast("Demo assessment created"); await routes["agent-flow"]();
+    }) }, "Create a demo assessment with sample evidence") : "";
+    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (6 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn));
+  }
+  drawControls(); draw();
+  main.replaceChildren(moduleFrame("AGENTS · LIVE VIEW", "Agent Flow", "Press Run and watch each agent pick up the work, do its part and hand the result to the next one.",
+    el("section", { class: "module-panel af-panel" }, controls, banner, el("div", { class: "af-sticky" }, stage, bubble), list,
+      note)));
+};
+
+
+// ---------- AI use cases: document inventory and framework gap analysis ----------
+const REVIEW_ROLES = ["cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer"];
+const TIER_LABEL = { prohibited: "Prohibited practice", high_risk: "High risk", limited_risk: "Limited risk", minimal_risk: "Minimal risk" };
+const TIER_CLASS = { prohibited: "high", high_risk: "high", limited_risk: "medium", minimal_risk: "ok" };
+const SEV_ORDER = ["critical", "high", "medium", "low", "info"];
+const STATUS_LABEL = { UNREVIEWED: "Needs review", VALIDATED: "Validated", REJECTED: "Rejected" };
+let useCaseNote = "";
+
+function statusChip(status) { return el("span", { class: `uc-status uc-${String(status).toLowerCase()}` }, STATUS_LABEL[status] || status); }
+function reviewControls(label, onDecide) {
+  const reason = el("input", { placeholder: "Reviewer reason (required)", maxlength: 2000, "aria-label": `${label}: reviewer reason` });
+  const go_ = (status) => safe(async () => { if (!reason.value.trim()) return toast("Enter a reviewer reason first", true); await onDecide(status, reason.value.trim()); });
+  return el("div", { class: "uc-review" }, reason, el("button", { onclick: go_("validated") }, "Validate"), el("button", { class: "secondary", onclick: go_("rejected") }, "Reject"));
+}
+
+function useCaseCard(aid, u, canReview, redraw) {
+  const meta = [["Business owner", u.business_owner], ["Technical owner", u.technical_owner], ["Model type", u.model_type],
+    ["Decision authority", u.decision_authority?.replaceAll("_", " ")], ["Foundation models", u.foundation_models_used?.join(", ")], ["Data sources", u.data_sources?.join(", ")]]
+    .filter(([, v]) => v);
+  return el("article", { class: `uc-card uc-card-${String(u.status).toLowerCase()}` },
+    el("div", { class: "uc-head" }, el("h4", {}, u.name), el("span", { class: `tag ${TIER_CLASS[u.risk_tier] || ""}` }, TIER_LABEL[u.risk_tier] || u.risk_tier),
+      statusChip(u.status), el("span", { class: "uc-conf", title: "How sure the agent is that this use case exists in the document" }, `${Math.round(u.extraction_confidence * 100)}% confidence`)),
+    el("p", { class: "uc-desc" }, u.description),
+    u.needs_validation && u.status === "UNREVIEWED" ? el("p", { class: "module-note" }, "Low confidence: check this against the source document before relying on it.") : "",
+    u.injection_flagged ? el("p", { class: "module-note" }, "The source document contained instruction-like text. It was treated as data only.") : "",
+    meta.length ? el("dl", { class: "uc-meta" }, meta.map(([k, v]) => el("div", {}, el("dt", {}, k), el("dd", {}, v)))) : "",
+    el("p", { class: "uc-why" }, el("strong", {}, "Why this risk tier (candidate, not a legal conclusion): "), u.risk_tier_rationale),
+    el("div", { class: "uc-quotes" }, el("span", { class: "eyebrow" }, `EVIDENCE FROM ${u.source_filename}`), u.source_quotes.map((q) => el("blockquote", {}, q))),
+    u.status !== "UNREVIEWED" ? el("p", { class: "help" }, `${STATUS_LABEL[u.status]} by ${u.reviewed_by}: ${u.review_reason}`)
+      : canReview ? reviewControls(u.name, async (status, reason) => { await api(`/v1/assessments/${aid}/inventory/use-cases/${u.use_case_id}`, { method: "PATCH", body: { status, reason } }); toast(`Use case ${status}`); redraw(); })
+        : el("p", { class: "help" }, "Waiting for a CloudSeals reviewer to validate this use case."));
+}
+
+function gapCard(aid, g, canReview, redraw) {
+  return el("article", { class: `uc-card uc-gap uc-sev-${g.severity}` },
+    el("div", { class: "uc-head" }, el("h4", {}, g.title), el("span", { class: `tag sev-${g.severity}` }, g.severity.toUpperCase()), statusChip(g.status),
+      el("span", { class: "uc-conf" }, `${g.framework_id.replaceAll("_", " ").toUpperCase()} · ${g.framework_clause.replaceAll("_", " ")}`)),
+    el("p", { class: "uc-desc" }, g.description),
+    el("p", { class: "uc-why" }, el("strong", {}, "Suggested action: "), g.recommendation, ` (about ${g.estimated_effort_days} person-days, ${g.suggested_timeline} days)`),
+    g.evidence_quotes.length ? el("div", { class: "uc-quotes" }, el("span", { class: "eyebrow" }, "EVIDENCE"), g.evidence_quotes.map((q) => el("blockquote", {}, q))) : "",
+    g.status !== "UNREVIEWED" ? el("p", { class: "help" }, `${STATUS_LABEL[g.status]} by ${g.reviewed_by}: ${g.review_reason}`)
+      : canReview ? reviewControls(g.title, async (status, reason) => { await api(`/v1/assessments/${aid}/gaps/${g.gap_id}`, { method: "PATCH", body: { status, reason } }); toast(`Gap ${status}`); redraw(); }) : "");
+}
+
+routes["use-cases"] = async (aidArg) => {
+  const { items: assessments } = await api("/v1/assessments");
+  if (!assessments.length) return main.replaceChildren(moduleFrame("DIAGNOSIS · AI INVENTORY", "AI use cases", "Read documents and list the AI use cases they evidence.",
+    el("p", { class: "empty-state" }, "Create an assessment and upload documents first."), el("a", { class: "btn", href: "#/assessments" }, "Go to Diagnosis")));
+  const aid = assessments.some((a) => a.assessment_id === aidArg) ? aidArg : assessments[0].assessment_id;
+  const canReview = state.me.roles.some((r) => REVIEW_ROLES.includes(r));
+  const [inv, evidence, fw] = await Promise.all([api(`/v1/assessments/${aid}/inventory`), api(`/v1/assessments/${aid}/evidence`), api("/v1/frameworks")]);
+  const docTypes = ["application/pdf", "text/plain", "text/csv", "application/json", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
+  const docs = evidence.items.filter((e) => e.state === "clean" && docTypes.includes(e.content_type));
+  const redraw = () => routes["use-cases"](aid);
+  const picker = el("label", { class: "uc-picker" }, "Assessment", el("select", { onchange: (e) => go(`#/use-cases/${e.target.value}`) },
+    assessments.map((a) => el("option", { value: a.assessment_id, selected: a.assessment_id === aid }, `${a.ai_system_name} (${a.status})`))));
+  const runBtn = el("button", { disabled: !docs.length, title: docs.length ? "" : "Upload a clean PDF, Word or text document first", onclick: safe(async (e) => {
+    e.currentTarget.disabled = true; e.currentTarget.textContent = "Reading documents…";
+    const r = await api(`/v1/assessments/${aid}/inventory/run`, { method: "POST", body: {} });
+    useCaseNote = r.mode === "unavailable" ? r.note : `${r.items.length} candidate use case(s) found in ${r.documents_read} document(s)${r.rejected ? `; ${r.rejected} unverifiable candidate(s) were dropped` : ""}.`;
+    await redraw();
+  }) }, "Find AI use cases in the documents");
+  const useCasePanel = el("section", { class: "module-panel" },
+    el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 1 · INVENTORY AGENT"), el("h3", {}, `${inv.use_cases.length} candidate use case${inv.use_cases.length === 1 ? "" : "s"}`))),
+    el("p", { class: "help" }, `${docs.length} readable document${docs.length === 1 ? "" : "s"} in this assessment (PDF, Word, text). Every candidate must quote the document word for word; anything the agent cannot back with a quote is discarded.`),
+    el("div", { class: "row" }, picker, runBtn), useCaseNote ? el("p", { class: "module-note" }, useCaseNote) : "",
+    inv.use_cases.length ? el("div", { class: "uc-list" }, inv.use_cases.map((u) => useCaseCard(aid, u, canReview, redraw)))
+      : el("p", { class: "empty-state" }, "No use cases yet. Upload documents in Diagnosis, then run the Inventory Agent."));
+  const validated = inv.use_cases.filter((u) => u.status === "VALIDATED").length;
+  const fwSel = el("select", { "aria-label": "Framework" }, fw.items.map((f) => el("option", { value: f.id }, `${f.short_name} (${f.requirement_count} requirements)`)));
+  const gapRun = el("button", { disabled: !validated, title: validated ? "" : "Validate at least one use case first", onclick: safe(async (e) => {
+    e.currentTarget.disabled = true; e.currentTarget.textContent = "Analysing…";
+    const r = await api(`/v1/assessments/${aid}/gap-analysis/run`, { method: "POST", body: { framework_id: fwSel.value } });
+    useCaseNote = r.mode === "unavailable" ? r.note : `${r.items.length} candidate gap(s) for ${fwSel.selectedOptions[0].textContent.split(" (")[0]}${r.rejected ? `; ${r.rejected} unverifiable candidate(s) were dropped` : ""}.`;
+    await redraw();
+  }) }, "Run gap analysis");
+  const gaps = [...inv.gaps].sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity));
+  const gapPanel = canReview ? el("section", { class: "module-panel" },
+    el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 2 · GAP ANALYSIS AGENT"), el("h3", {}, `${gaps.length} candidate gap${gaps.length === 1 ? "" : "s"}`))),
+    el("p", { class: "help" }, "Compares validated use cases with a framework. Each gap cites a real requirement or control ID and stays unreviewed until a reviewer decides."),
+    el("div", { class: "row" }, el("label", { class: "uc-picker" }, "Framework", fwSel), gapRun),
+    gaps.length ? el("div", { class: "uc-list" }, gaps.map((g) => gapCard(aid, g, canReview, redraw))) : el("p", { class: "empty-state" }, validated ? "No gaps recorded yet. Run the analysis." : "Validate a use case to unlock gap analysis."))
+    : el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "STEP 2 · GAP ANALYSIS"), el("p", { class: "help" }, inv.gaps_note || "Gap analysis is prepared by CloudSeals reviewers."));
+  main.replaceChildren(moduleFrame("DIAGNOSIS · AI INVENTORY", "AI use cases", "From documents to a reviewed inventory, then a framework gap analysis. Nothing here is saved as an answer, approved or published automatically.", useCasePanel, gapPanel));
+};
+
+routes.frameworks = async (fid) => {
+  const { items } = await api("/v1/frameworks");
+  const active = items.find((f) => f.id === fid)?.id;
+  const detail = active ? await api(`/v1/frameworks/${active}`) : null;
+  const cards = items.map((f) => el("a", { class: `module-card module-card-link${f.id === active ? " module-card-primary" : ""}`, href: `#/frameworks/${f.id}` },
+    el("span", { class: "module-card-status" }, "PENDING LEGAL REVIEW"), el("h3", {}, f.short_name), el("p", {}, `${f.name} · ${f.jurisdiction}`),
+    el("p", {}, `${f.requirement_count} requirements · ${f.control_count} controls`), el("span", { class: "module-card-open" }, "View requirements →")));
+  const body = detail ? el("section", { class: "module-panel" },
+    el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, detail.version || "FRAMEWORK"), el("h3", {}, detail.name))),
+    el("p", { class: "module-note" }, detail.notice), el("p", { class: "help" }, detail.description),
+    detail.requirements.map((r) => el("details", { class: "fw-req" }, el("summary", {}, el("strong", {}, r.title), el("span", { class: "q-id" }, ` ${r.id}`)),
+      el("p", {}, r.text), el("ul", { class: "fw-controls" }, (r.controls || []).map((c) => el("li", {}, el("span", { class: "q-id" }, c.id), ` ${c.description}`,
+        c.evidence_needed?.length ? el("small", {}, ` Evidence: ${c.evidence_needed.join("; ")}`) : ""))))))
+    : el("p", { class: "empty-state" }, "Choose a framework to read its requirements and controls.");
+  main.replaceChildren(moduleFrame("OPERATIONS · REFERENCE", "Frameworks", "The requirement and control definitions the gap analysis agent compares use cases against. Read-only.",
+    el("section", { class: "module-card-grid fw-grid" }, cards), body));
 };
 
 // ---------- boot ----------

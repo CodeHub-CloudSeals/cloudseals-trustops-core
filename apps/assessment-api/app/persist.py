@@ -1,4 +1,5 @@
-"""Write-through persistence of Store state via SQLAlchemy: SQLite (dev) or Aurora PostgreSQL (AWS).
+"""Write-through persistence of Store state: SQLite (dev), PostgreSQL via SQLAlchemy (Aurora / Cloud SQL), or one object in
+Google Cloud Storage (`TAAD_STATE_GCS_URI=gs://bucket/state.json`, optimistic locking with `if_generation_match`).
 
 This is a single-writer snapshot design (one `state` row, optimistic version check). It is durable and restart-safe,
 but NOT horizontally scalable: run one API task until the normalised repository (db/migrations/002) replaces it.
@@ -15,7 +16,7 @@ from sqlalchemy.engine import URL, Engine
 from .store import Store
 
 TUPLE_KEYED = {"answers", "idempotency"}
-FIELDS = ["users", "tenants", "assessments", "answers", "revisions", "evidence", "findings", "reports", "blueprints",
+FIELDS = ["users", "tenants", "assessments", "answers", "revisions", "evidence", "findings", "reports", "blueprints", "inventory",
           "idempotency", "registrations", "events", "audit", "invitations", "assignments", "engagements", "rate", "outbox",
           "not_assessed", "admin_bootstrap", "workflow_runs", "action_tokens", "runtime_evidence", "mock_sap"]
 META = MetaData()
@@ -32,6 +33,8 @@ _versions: dict[str, int] = {}
 
 
 def url_from_env(sqlite_path: Optional[str] = None) -> Optional[str | URL]:
+    if os.environ.get("TAAD_STATE_GCS_URI"):
+        return os.environ["TAAD_STATE_GCS_URI"]
     if os.environ.get("TAAD_DB_HOST"):
         return URL.create("postgresql+psycopg", username=os.environ["TAAD_DB_USER"], password=os.environ["TAAD_DB_PASSWORD"],
                           host=os.environ["TAAD_DB_HOST"], database=os.environ.get("TAAD_DB_NAME", "taad"),
@@ -73,10 +76,60 @@ def _apply(store: Store, body: str) -> None:
             cur.update(dec) if isinstance(cur, dict) else cur.extend(dec)
 
 
+# ---- Google Cloud Storage backend: the snapshot is a single object; its generation number is the version ----
+_gcs_client: Any = None
+
+
+def set_gcs_client(client: Any) -> None:  # tests
+    global _gcs_client
+    _gcs_client = client
+
+
+def _is_gcs(target: Any) -> bool:
+    return isinstance(target, str) and target.startswith("gs://")
+
+
+def _gcs_parts(target: str) -> tuple[Any, str]:
+    global _gcs_client
+    if _gcs_client is None:
+        from google.cloud import storage  # lazy: optional dependency
+        _gcs_client = storage.Client()
+    bucket, _, name = target[5:].partition("/")
+    return _gcs_client.bucket(bucket), name or "state.json"
+
+
+def _gcs_load(store: Store, target: str) -> bool:
+    bucket, name = _gcs_parts(target)
+    blob = bucket.get_blob(name)
+    if blob is None:
+        _versions[target] = 0
+        return False
+    body = blob.download_as_text()
+    _versions[target] = blob.generation
+    _apply(store, body)
+    return True
+
+
+def _gcs_save(store: Store, target: str) -> None:
+    from google.api_core.exceptions import PreconditionFailed
+    bucket, name = _gcs_parts(target)
+    with store.lock:
+        blob_text = json.dumps({f: _enc(f, getattr(store, f)) for f in FIELDS}, default=str)
+    blob = bucket.blob(name)
+    try:
+        blob.upload_from_string(blob_text, content_type="application/json", if_generation_match=_versions.get(target, 0))
+    except PreconditionFailed:
+        _gcs_load(store, target)
+        raise PersistConflict("concurrent writer detected; state reloaded, retry the request") from None
+    _versions[target] = blob.generation
+
+
 def load(store: Store, target: Optional[str | URL] = None) -> bool:
     target = target or url_from_env(os.environ.get("TAAD_DB"))
     if target is None:
         return False
+    if _is_gcs(target):
+        return _gcs_load(store, str(target))
     eng = _engine(target)
     with eng.connect() as c:
         row = c.execute(select(STATE.c.version, STATE.c.body).where(STATE.c.id == 1)).first()
@@ -92,6 +145,8 @@ def save(store: Store, target: Optional[str | URL] = None) -> None:
     target = target or url_from_env(os.environ.get("TAAD_DB"))
     if target is None:
         return
+    if _is_gcs(target):
+        return _gcs_save(store, str(target))
     eng, key = _engine(target), str(target)
     with store.lock:
         blob = json.dumps({f: _enc(f, getattr(store, f)) for f in FIELDS}, default=str)

@@ -17,6 +17,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import kms
+
 ROOT = Path(__file__).resolve().parents[3]
 PACK = json.loads((ROOT / "packs/workflows/ledgersight.ar_cash/0.1.0.json").read_text())
 AGENT_MANIFESTS = PACK["agents"]
@@ -65,6 +67,12 @@ class BedrockAgentModelClient:
 
 
 def configured_model_client() -> AgentModelClient | None:
+    from . import llm
+    if llm.provider() == "vertex":
+        try:
+            return llm.vertex_client()
+        except Exception as exc:
+            raise RuntimeErrorCode("agent_model_unavailable", "TrustOps Vertex model client could not be initialized") from exc
     model_id = os.environ.get("TRUSTOPS_AGENT_MODEL_ID", "").strip()
     if not model_id:
         return None
@@ -216,7 +224,7 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
     for step, output in zip(result["agent_trace"], outputs):
         step["model"] = client.model_id
         step["recommendation"] = output
-    result["agent_mode"] = "bedrock"
+    result["agent_mode"] = "vertex" if type(client).__name__ == "VertexModelClient" else "bedrock"
     result["model_id"] = client.model_id
 
 
@@ -365,8 +373,27 @@ def append_evidence(chain: list[dict[str, Any]], tenant_id: str, run_id: str, ev
               "run_id": run_id, "event_type": event_type, "occurred_at": time.time(), "previous_hash": prev,
               "payload": payload, "payload_digest": canonical_digest(payload)}
     record["record_hash"] = canonical_digest(record)
+    signer = kms.from_env()
+    if signer is not None:
+        try:
+            record["signature"] = signer.sign(record["record_hash"])  # signature is excluded from the hash it signs
+        except kms.SigningError as exc:
+            raise RuntimeErrorCode("evidence_signing_failed", "Evidence could not be signed; the action was not recorded") from exc
     chain.append(record)
     return record
+
+
+def verify_signatures(chain: list[dict[str, Any]], tenant_id: str) -> dict[str, Any]:
+    """Check every KMS signature against the key's public half. `signed` is False when no record carries a signature."""
+    records = [e for e in chain if e["tenant_id"] == tenant_id]
+    signed = [e for e in records if e.get("signature")]
+    signer = kms.from_env()
+    if not signed:
+        return {"signed": False, "all_valid": None, "count": 0}
+    if signer is None:
+        return {"signed": True, "all_valid": None, "count": len(signed), "note": "KMS verification is not configured here"}
+    return {"signed": True, "count": len(signed), "all_valid": len(signed) == len(records) and all(
+        signer.verify(e["record_hash"], e["signature"]) for e in signed)}
 
 
 def verify_evidence(chain: list[dict[str, Any]], tenant_id: str) -> bool:
@@ -375,6 +402,7 @@ def verify_evidence(chain: list[dict[str, Any]], tenant_id: str) -> bool:
     for original in (e for e in chain if e["tenant_id"] == tenant_id):
         record = dict(original)
         recorded_hash = record.pop("record_hash", None)
+        record.pop("signature", None)
         if record["sequence"] != expected_seq or record["previous_hash"] != previous:
             return False
         if record["payload_digest"] != canonical_digest(record["payload"]) or recorded_hash != canonical_digest(record):

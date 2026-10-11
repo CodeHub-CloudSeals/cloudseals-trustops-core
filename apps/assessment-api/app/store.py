@@ -17,6 +17,7 @@ class Store:
         self.findings: dict[str, list[dict]] = {}
         self.reports: dict[str, dict[str, Any]] = {}
         self.blueprints: dict[str, dict[str, Any]] = {}
+        self.inventory: dict[str, dict[str, Any]] = {}       # assessment -> {"use_cases": [...], "gaps": [...]} (UNREVIEWED until validated)
         self.idempotency: dict[tuple[str, str, str], Any] = {}
         self.registrations: list[dict[str, Any]] = []
         self.events: list[dict[str, Any]] = []

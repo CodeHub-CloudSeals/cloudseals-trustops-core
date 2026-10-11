@@ -19,7 +19,7 @@ INJECTION = re.compile(r"ignore (all|previous|prior)|system prompt|you are now|d
 
 
 class ModelClient(Protocol):
-    def complete(self, system: str, user: str) -> str: ...
+    def complete(self, system: str, user: str, max_tokens: int = 600) -> str: ...
 
 
 class BedrockModelClient:
@@ -30,14 +30,17 @@ class BedrockModelClient:
         self.model_id = model_id
         self.client = boto3.client("bedrock-runtime", region_name=region)
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, max_tokens: int = 600) -> str:
         r = self.client.converse(modelId=self.model_id, system=[{"text": system}],
                                  messages=[{"role": "user", "content": [{"text": user}]}],
-                                 inferenceConfig={"maxTokens": 600, "temperature": 0})
+                                 inferenceConfig={"maxTokens": max_tokens, "temperature": 0})
         return r["output"]["message"]["content"][0]["text"]
 
 
 def default_client() -> Optional[ModelClient]:
+    from . import llm
+    if llm.provider() == "vertex":
+        return llm.vertex_client()
     if os.environ.get("TAAD_SWASKA_MODEL") == "bedrock":
         return BedrockModelClient(os.environ["TAAD_BEDROCK_MODEL_ID"], os.environ.get("AWS_REGION", "eu-west-2"))
     return None

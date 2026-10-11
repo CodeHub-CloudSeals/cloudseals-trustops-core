@@ -56,3 +56,68 @@ def test_first_admin_bootstrap_marker_survives_restart(env, tmp_path):
     STORE.admin_bootstrap.clear()
     assert persist.load(STORE, url)
     assert STORE.admin_bootstrap == {"completed_at": 1234.0, "sub": "first-admin-sub"}
+
+
+class FakeGcs:
+    """In-memory bucket that honours generation preconditions like the real service."""
+
+    def __init__(self):
+        self.objects = {}   # name -> (generation, text)
+        self.counter = 0
+
+    def bucket(self, name):
+        return FakeBucket(self)
+
+
+class FakeBlob:
+    def __init__(self, gcs, name, gen=None, text=None):
+        self.gcs, self.name, self.generation, self._text = gcs, name, gen, text
+
+    def download_as_text(self):
+        return self._text
+
+    def upload_from_string(self, text, content_type=None, if_generation_match=None):
+        from google.api_core.exceptions import PreconditionFailed
+        cur = self.gcs.objects.get(self.name)
+        if (cur[0] if cur else 0) != if_generation_match:
+            raise PreconditionFailed("generation mismatch")
+        self.gcs.counter += 1
+        self.gcs.objects[self.name] = (self.gcs.counter, text)
+        self.generation = self.gcs.counter
+
+
+class FakeBucket:
+    def __init__(self, gcs):
+        self.gcs = gcs
+
+    def get_blob(self, name):
+        cur = self.gcs.objects.get(name)
+        return FakeBlob(self.gcs, name, cur[0], cur[1]) if cur else None
+
+    def blob(self, name):
+        return FakeBlob(self.gcs, name)
+
+
+def test_gcs_state_roundtrip_and_concurrent_writer_detected(env):
+    import pytest
+    c, h = env
+    gcs = FakeGcs()
+    persist.set_gcs_client(gcs)
+    try:
+        uri = "gs://bucket/state.json"
+        aid = new_assessment(c, h, "admin@t-bank")
+        persist.save(STORE, uri)                     # first write: object must not exist yet
+        persist.save(STORE, uri)                     # later writes carry the generation they read
+        for name in vars(STORE):
+            v = getattr(STORE, name)
+            if hasattr(v, "clear"):
+                v.clear()
+        assert persist.load(STORE, uri) and aid in STORE.assessments
+        other = FakeBucket(gcs).blob("state.json")   # another instance writes in between
+        other.upload_from_string("{}", if_generation_match=gcs.objects["state.json"][0])
+        with pytest.raises(persist.PersistConflict):
+            persist.save(STORE, uri)
+        assert persist._versions[uri] == gcs.objects["state.json"][0]   # local version caught up with the winner; the retry succeeds
+        persist.save(STORE, uri)
+    finally:
+        persist.set_gcs_client(None)

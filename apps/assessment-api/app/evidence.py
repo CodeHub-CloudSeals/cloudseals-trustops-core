@@ -36,6 +36,9 @@ class LocalObjectStore:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
 
+    def get(self, tenant: str, bucket: str, key: str) -> bytes:
+        return self.path(tenant, bucket, key).read_bytes()
+
     def delete(self, tenant: str, bucket: str, key: str) -> None:
         self.path(tenant, bucket, key).unlink(missing_ok=True)
 
@@ -89,6 +92,9 @@ class S3ObjectStore:
                             ServerSideEncryption="aws:kms", SSEKMSKeyId=self.kms)
         self.s3.delete_object(**src)
 
+    def get(self, tenant: str, bucket: str, key: str) -> bytes:
+        return self.s3.get_object(Bucket=self.buckets[bucket], Key=f"{tenant}/{key}")["Body"].read()
+
     def scan_status(self, tenant: str, key: str) -> str | None:
         """Read GuardDuty's post-scan tag. Missing tags mean the asynchronous scan is pending."""
         result = self.s3.get_object_tagging(
@@ -101,7 +107,34 @@ class S3ObjectStore:
         self.s3.delete_object(Bucket=self.buckets[bucket], Key=f"{tenant}/{key}")
 
 
+class GCSObjectStore:
+    """Google Cloud Storage backend (single evidence bucket, CMEK optional, no public access).
+
+    Unlike the S3 path there is no asynchronous malware-scan tag: uploads rely on the byte-level checks in `inspect`
+    before they are stored. Add a scanner (e.g. a Cloud Run job reading this bucket) before accepting untrusted files in prod.
+    """
+
+    def __init__(self, evidence_bucket: str, client=None) -> None:
+        if client is None:
+            from google.cloud import storage  # lazy: optional dependency
+            client = storage.Client()
+        self.bucket = client.bucket(evidence_bucket)
+
+    def put(self, tenant: str, bucket: str, key: str, data: bytes) -> None:
+        self.bucket.blob(f"{tenant}/{bucket}/{key}").upload_from_string(data, content_type="application/octet-stream")
+
+    def get(self, tenant: str, bucket: str, key: str) -> bytes:
+        return self.bucket.blob(f"{tenant}/{bucket}/{key}").download_as_bytes()
+
+    def delete(self, tenant: str, bucket: str, key: str) -> None:
+        blob = self.bucket.blob(f"{tenant}/{bucket}/{key}")
+        if blob.exists():
+            blob.delete()
+
+
 def make_store():
+    if os.environ.get("TAAD_OBJECT_BACKEND") == "gcs":
+        return GCSObjectStore(os.environ["TAAD_BUCKET_EVID"])
     if os.environ.get("TAAD_OBJECT_BACKEND") == "s3":
         return S3ObjectStore(os.environ["TAAD_BUCKET_QUAR"], os.environ["TAAD_BUCKET_EVID"], os.environ["TAAD_KMS_KEY_ARN"])
     return LocalObjectStore()

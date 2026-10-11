@@ -20,9 +20,9 @@ from pydantic import BaseModel, Field
 from question_engine import candidate_findings, eligible_questions, load_registry
 from question_engine.branching import is_eligible
 
-from . import persist, swaska, trustops_runtime
+from . import llm, persist, swaska, taad_agents, trustops_runtime, use_cases
 from .evidence import inspect, make_store
-from .security import AUTH_MODE, CLOUDSEALS_ROLES, ENV, issue_token, verify_token
+from .security import AUTH_MODE, AUTH_PROVIDER, CLOUDSEALS_ROLES, ENV, issue_token, verify_identity
 from .store import Store
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -96,18 +96,43 @@ async def http_err(request: Request, exc: HTTPException):
     return JSONResponse(status_code=exc.status_code, content={**d, "trace_id": uuid.uuid4().hex})
 
 
-def authenticated_sub(authorization: Optional[str] = Header(default=None)) -> str:
-    """Identity only (no membership required): used by invitation acceptance."""
+def authenticated_identity(authorization: Optional[str] = Header(default=None)) -> dict:
     if not authorization or not authorization.startswith("Bearer "):
         raise err(401, "unauthenticated", "Bearer token required")
-    sub = verify_token(authorization[7:])
-    if not sub:
+    ident = verify_identity(authorization[7:])
+    if not ident:
         raise err(401, "unauthenticated", "Invalid token")
-    return sub
+    return ident
 
 
-def principal(sub: str = Depends(authenticated_sub)) -> Principal:
+def authenticated_sub(ident: dict = Depends(authenticated_identity)) -> str:
+    """Identity only (no membership required): used by invitation acceptance."""
+    return ident["sub"]
+
+
+def maybe_bootstrap_first_admin(ident: dict) -> bool:
+    """One-time first CloudSeals admin: the verified Google email named in TAAD_FIRST_ADMIN_EMAIL, dev environment only,
+    only while no admin exists. Recorded in the audit log and the durable state; the setting is inert afterwards."""
+    want = os.environ.get("TAAD_FIRST_ADMIN_EMAIL", "").strip().lower()
+    if not (want and ENV == "dev" and AUTH_MODE == "oidc" and ident.get("email_verified") and ident.get("email") == want):
+        return False
+    with STORE.lock:
+        if STORE.admin_bootstrap or any("cloudseals_admin" in u.get("roles", []) for u in STORE.users.values()):
+            return False
+        STORE.users[ident["sub"]] = {"tenant_id": None, "roles": ["cloudseals_admin"], "email": want}
+        STORE.admin_bootstrap.update({"completed_at": time.time(), "sub": ident["sub"], "email": want})
+        STORE.audit.append({"at": time.time(), "sub": ident["sub"], "tenant_id": None, "action": "admin.bootstrap",
+                            "ref": "first_cloudseals_admin"})
+    if persist.enabled():
+        persist.save(STORE)
+    return True
+
+
+def principal(ident: dict = Depends(authenticated_identity)) -> Principal:
+    sub = ident["sub"]
     user = STORE.users.get(sub)
+    if not user and maybe_bootstrap_first_admin(ident):
+        user = STORE.users.get(sub)
     if not user:
         raise err(401, "unauthenticated", "Invalid token")
     return Principal(sub=sub, tenant_id=user.get("tenant_id"), roles=user["roles"])
@@ -446,7 +471,7 @@ def list_evidence(aid: str, p: Principal = Depends(principal)):
         for ev in STORE.evidence.values():
             if ev["assessment_id"] == aid:
                 refresh_guardduty_scan(ev)
-    return {"items": [{k: e.get(k) for k in ("evidence_id", "filename", "state", "reason", "injection_flagged", "size")}
+    return {"items": [{k: e.get(k) for k in ("evidence_id", "filename", "content_type", "state", "reason", "injection_flagged", "size")}
                       for e in STORE.evidence.values() if e["assessment_id"] == aid]}
 
 
@@ -607,6 +632,206 @@ def poc_blueprint(aid: str, body: POCBlueprintRequest, p: Principal = Depends(pr
         audit(p, "poc.blueprint", bid)
         return bp
     return idempotent(p, idempotency_key, f"poc:{aid}:{body.report_id}", do)
+
+
+# ---------- advisory TAAD / TrustOps agents (read-only, nothing persisted) ----------
+class ExtractionRequest(BaseModel):
+    evidence_id: str
+
+
+AGENT_CALLS_PER_MINUTE = int(os.environ.get("TAAD_AGENT_CALLS_PER_MINUTE", "20"))
+
+
+def agent_throttle(p: Principal, agent_id: str) -> None:
+    """Per-user sliding-window limit so advisory (model-backed) agents cannot be used to burn model budget."""
+    now = time.time()
+    with STORE.lock:
+        k = f"agent:{p.sub}"
+        STORE.rate[k] = [t for t in STORE.rate.get(k, []) if now - t < 60]
+        if len(STORE.rate[k]) >= AGENT_CALLS_PER_MINUTE:
+            raise err(429, "rate_limited", "Too many agent requests; try again in a minute")
+        STORE.rate[k].append(now)
+
+
+STAFF_REVIEW = ("cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer")
+
+
+@app.get("/v1/agents")
+def agent_registry(p: Principal = Depends(principal)):
+    return {"items": [{k: v for k, v in a.items() if k != "behavior_policy"} for a in taad_agents.AGENTS.values()],
+            "behavior_policy": taad_agents.CATALOG["common_behavior_policy"]}
+
+
+@app.post("/v1/assessments/{aid}/agents/extraction")
+def agent_extraction(aid: str, body: ExtractionRequest, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    agent_throttle(p, taad_agents.EXTRACTION)
+    ev = STORE.evidence.get(body.evidence_id)
+    if not ev or ev["assessment_id"] != aid or ev["state"] != "clean":
+        raise err(422, "invalid_evidence_ref", "Evidence must exist for this assessment and be clean")
+    if ev["content_type"] not in ("text/plain", "text/csv", "application/json"):
+        raise err(422, "unsupported_evidence_type", "Extraction supports text, CSV and JSON evidence")
+
+    def text(evidence_id: str) -> str:
+        return OBJECTS.get(ev["tenant_id"], "evidence", evidence_id).decode("utf-8", "replace")[:200000]
+    tools = taad_agents.Tools(taad_agents.EXTRACTION, {"get_evidence_text": text,
+                                                       "list_published_questions": lambda: sorted(REG.questions)})
+    audit(p, "agent.extraction", body.evidence_id)
+    return taad_agents.extract_candidates(SWASKA_CLIENT, tools, body.evidence_id, set(REG.questions))
+
+
+@app.post("/v1/assessments/{aid}/agents/findings-summary")
+def agent_findings_summary(aid: str, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    agent_throttle(p, taad_agents.FINDINGS)
+    tools = taad_agents.Tools(taad_agents.FINDINGS, {"get_candidate_findings": lambda: STORE.findings.get(aid, [])})
+    audit(p, "agent.findings_summary", aid)
+    return taad_agents.summarize_findings(SWASKA_CLIENT, tools)
+
+
+@app.post("/v1/assessments/{aid}/poc-blueprints/{bid}/draft-notes")
+def agent_draft_notes(aid: str, bid: str, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, "cloudseals_admin", "cloudseals_assessor")
+    agent_throttle(p, taad_agents.DRAFTER)
+    bp = STORE.blueprints.get(bid)
+    if not bp or bp["assessment_id"] != aid:
+        raise err(404, "not_found", "Blueprint not found")
+    audit(p, "agent.poc_draft_notes", bid)
+    return taad_agents.draft_notes(SWASKA_CLIENT, taad_agents.Tools(taad_agents.DRAFTER, {"get_draft_blueprint": lambda: bp}))
+
+
+@app.get("/v1/runs/{run_id}/approval-summary")
+def agent_approval_summary(run_id: str, p: Principal = Depends(principal)):
+    run = runtime_run(p, run_id)
+    require(p, "customer_controller", "customer_admin", "cloudseals_admin", "cloudseals_reviewer", "auditor_readonly")
+    agent_throttle(p, taad_agents.APPROVAL)
+    audit(p, "agent.approval_summary", run_id)
+    return taad_agents.summarize_approval(SWASKA_CLIENT, taad_agents.Tools(taad_agents.APPROVAL, {"get_workflow_run": lambda: run}))
+
+
+@app.get("/v1/assessments/{aid}/poc-blueprints")
+def list_blueprints(aid: str, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, "cloudseals_admin", "cloudseals_assessor")
+    return {"items": [{"blueprint_id": b["blueprint_id"], "state": b["state"], "workflow_pack_id": b["workflow_pack_id"]}
+                      for b in STORE.blueprints.values() if b["assessment_id"] == aid]}
+
+
+# ---------- AI use-case inventory, framework library and gap analysis (advisory; reviewer-gated) ----------
+class InventoryRunRequest(BaseModel):
+    evidence_ids: list[str] = Field(default_factory=list, max_length=8)
+
+
+class GapRunRequest(BaseModel):
+    framework_id: str
+
+
+class ReviewItem(BaseModel):
+    status: Literal["validated", "rejected"]
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+def _inv(aid: str) -> dict:
+    return STORE.inventory.setdefault(aid, {"use_cases": [], "gaps": []})
+
+
+def _merge(existing: list[dict], fresh: list[dict], key: str, keep: Any) -> list[dict]:
+    """Re-running an agent replaces its unreviewed output; anything a reviewer already decided is kept untouched."""
+    decided = {x[key]: x for x in existing if x["status"] != "UNREVIEWED"}
+    kept_other = [x for x in existing if x["status"] == "UNREVIEWED" and not keep(x)]
+    return kept_other + list(decided.values()) + [x for x in fresh if x[key] not in decided]
+
+
+@app.get("/v1/frameworks")
+def list_frameworks(p: Principal = Depends(principal)):
+    return {"items": [use_cases.framework_summary(f) for f in use_cases.FRAMEWORKS]}
+
+
+@app.get("/v1/frameworks/{fid}")
+def get_framework(fid: str, p: Principal = Depends(principal)):
+    if fid not in use_cases.FRAMEWORKS:
+        raise err(404, "not_found", "Framework not found")
+    d = use_cases.FRAMEWORKS[fid]
+    return {**use_cases.framework_summary(fid), "requirements": d["requirements"], "provenance": d["provenance"]}
+
+
+@app.post("/v1/assessments/{aid}/inventory/run")
+def run_inventory(aid: str, body: InventoryRunRequest, p: Principal = Depends(principal)):
+    a = get_assessment(p, aid)
+    agent_throttle(p, taad_agents.INVENTORY)
+    ev = [e for e in STORE.evidence.values() if e["assessment_id"] == aid and e["state"] == "clean"
+          and e["content_type"] in use_cases.DOC_TYPES and (not body.evidence_ids or e["evidence_id"] in body.evidence_ids)]
+    if body.evidence_ids and len(ev) != len(set(body.evidence_ids)):
+        raise err(422, "invalid_evidence_ref", "Every evidence file must exist for this assessment, be clean and be a supported document")
+    docs, skipped = [], []
+    for e in ev[:use_cases.MAX_DOCS]:
+        try:
+            docs.append({"evidence_id": e["evidence_id"], "filename": e["filename"], "text": use_cases.extract_text(
+                e["content_type"], OBJECTS.get(a["tenant_id"], "evidence", e["evidence_id"]))})
+        except Exception:
+            skipped.append(e["filename"])
+    result = use_cases.run_inventory(SWASKA_CLIENT, [d for d in docs if d["text"].strip()])
+    with STORE.lock:
+        inv = _inv(aid)
+        ran = {d["evidence_id"] for d in docs}
+        inv["use_cases"] = _merge(inv["use_cases"], result["items"], "use_case_id", lambda x: x["evidence_id"] in ran)
+        audit(p, "agent.inventory", aid)
+    return {**result, "documents_read": len(docs), "documents_skipped": skipped,
+            "agent_id": taad_agents.INVENTORY, "advisory_only": True, "use_cases": inv["use_cases"]}
+
+
+@app.get("/v1/assessments/{aid}/inventory")
+def get_inventory(aid: str, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    inv = _inv(aid)
+    visible_gaps = inv["gaps"] if p.is_staff else []   # gaps are reviewer material until a report is published
+    return {"use_cases": inv["use_cases"], "gaps": visible_gaps, "gaps_note": None if p.is_staff else "Gap analysis is visible after reviewer approval"}
+
+
+@app.patch("/v1/assessments/{aid}/inventory/use-cases/{uid}")
+def review_use_case(aid: str, uid: str, body: ReviewItem, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    with STORE.lock:
+        uc = next((u for u in _inv(aid)["use_cases"] if u["use_case_id"] == uid), None)
+        if not uc:
+            raise err(404, "not_found", "Use case not found")
+        uc.update(status=body.status.upper(), reviewed_by=p.sub, review_reason=body.reason, reviewed_at=time.time())
+        audit(p, f"inventory.{body.status}", uid)
+    return uc
+
+
+@app.post("/v1/assessments/{aid}/gap-analysis/run")
+def run_gap_analysis(aid: str, body: GapRunRequest, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    if body.framework_id not in use_cases.FRAMEWORKS:
+        raise err(404, "not_found", "Framework not found")
+    agent_throttle(p, taad_agents.GAP)
+    validated = [u for u in _inv(aid)["use_cases"] if u["status"] == "VALIDATED"]
+    if not validated:
+        raise err(409, "no_validated_use_cases", "Validate at least one AI use case before running gap analysis")
+    result = use_cases.run_gap_analysis(SWASKA_CLIENT, body.framework_id, validated)
+    with STORE.lock:
+        inv = _inv(aid)
+        inv["gaps"] = _merge(inv["gaps"], result["items"], "gap_id", lambda x: x["framework_id"] == body.framework_id)
+        audit(p, "agent.gap_analysis", f"{aid}/{body.framework_id}")
+    return {**result, "agent_id": taad_agents.GAP, "advisory_only": True, "gaps": inv["gaps"]}
+
+
+@app.patch("/v1/assessments/{aid}/gaps/{gid}")
+def review_gap(aid: str, gid: str, body: ReviewItem, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    with STORE.lock:
+        gap = next((g for g in _inv(aid)["gaps"] if g["gap_id"] == gid), None)
+        if not gap:
+            raise err(404, "not_found", "Gap not found")
+        gap.update(status=body.status.upper(), reviewed_by=p.sub, review_reason=body.reason, reviewed_at=time.time())
+        audit(p, f"gap.{body.status}", gid)
+    return gap
 
 
 @app.get("/v1/admin/metrics")
@@ -774,10 +999,12 @@ def agentops(p: Principal = Depends(principal)):
     require(p, "cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor",
             "customer_admin", "customer_architect", "customer_risk", "customer_controller", "customer_contributor", "auditor_readonly")
     runs = [r for r in STORE.workflow_runs.values() if p.is_staff or r["tenant_id"] == p.tenant_id]
-    model_configured = bool(os.environ.get("TRUSTOPS_AGENT_MODEL_ID", "").strip())
+    model_configured = bool(llm.provider())
     return {"mode": "sandbox" if runtime_enabled() else "unavailable",
-            "agent_mode": "bedrock_configured" if model_configured else "deterministic",
-            "model_id": os.environ.get("TRUSTOPS_AGENT_MODEL_ID") if model_configured else None,
+            "agent_mode": f"{llm.provider()}_configured" if llm.provider() else "deterministic",
+            "model_id": (os.environ.get("TAAD_VERTEX_MODEL", llm.DEFAULT_VERTEX_MODEL) if llm.provider() == "vertex"
+                         else os.environ.get("TRUSTOPS_AGENT_MODEL_ID")) if model_configured else None,
+            "evidence_signing": "cloud_kms" if os.environ.get("TAAD_KMS_SIGNING_KEY_VERSION") else "local_hash_chain",
             "agents": trustops_runtime.AGENT_MANIFESTS,
             "workflow_pack": trustops_runtime.PACK_ID, "workflow_version": trustops_runtime.PACK_VERSION,
             "global_prohibitions": trustops_runtime.PACK["global_prohibitions"],
@@ -973,8 +1200,10 @@ def verify_runtime_evidence(run_id: str, p: Principal = Depends(principal)):
     run = runtime_run(p, run_id)
     records = [r for r in STORE.runtime_evidence if r["run_id"] == run_id and r["tenant_id"] == run["tenant_id"]]
     valid = trustops_runtime.verify_evidence(STORE.runtime_evidence, run["tenant_id"])
-    return {"run_id": run_id, "valid": valid, "records": records,
-            "integrity": "local_hash_chain_only", "production_signature": False}
+    sigs = trustops_runtime.verify_signatures(STORE.runtime_evidence, run["tenant_id"])
+    return {"run_id": run_id, "valid": valid, "records": records, "signatures": sigs,
+            "integrity": "kms_signed_hash_chain" if sigs["signed"] else "local_hash_chain_only",
+            "production_signature": bool(sigs["signed"] and sigs["all_valid"])}
 
 
 # ---------- assessment detail, progress, assignments ----------
@@ -1087,21 +1316,56 @@ def portal_config():
         return {"mode": "dev", "oidc": {}}
     if AUTH_MODE != "oidc":
         raise err(503, "portal_auth_misconfigured", "Portal requires OIDC authentication outside local development")
+    google = AUTH_PROVIDER == "google"
     oidc = {
-        "authorize_url": os.environ.get("TAAD_PORTAL_AUTHORIZE_URL", ""),
-        "token_url": os.environ.get("TAAD_PORTAL_TOKEN_URL", ""),
-        "client_id": os.environ.get("TAAD_PORTAL_CLIENT_ID", ""),
+        "provider": "google" if google else "oidc",
+        "authorize_url": GOOGLE_AUTHORIZE_URL if google else os.environ.get("TAAD_PORTAL_AUTHORIZE_URL", ""),
+        # Google's web client needs a client secret at the token endpoint, so the portal exchanges the code via this API.
+        "token_url": "/v1/auth/token" if google else os.environ.get("TAAD_PORTAL_TOKEN_URL", ""),
+        "client_id": os.environ.get("TAAD_GOOGLE_CLIENT_ID" if google else "TAAD_PORTAL_CLIENT_ID", ""),
         "redirect_uri": os.environ.get("TAAD_PORTAL_REDIRECT_URI", ""),
-        "logout_url": os.environ.get("TAAD_PORTAL_LOGOUT_URL", ""),
-        "scope": "openid email",
+        "logout_url": "" if google else os.environ.get("TAAD_PORTAL_LOGOUT_URL", ""),
+        "scope": "openid email profile" if google else "openid email",
     }
-    for key in ("authorize_url", "token_url", "logout_url", "redirect_uri"):
+    required = ("authorize_url", "redirect_uri") if google else ("authorize_url", "token_url", "logout_url", "redirect_uri")
+    for key in required:
         parsed = urlparse(oidc[key])
         if parsed.scheme != "https" or not parsed.netloc:
-            raise err(503, "portal_auth_misconfigured", "Cognito sign-in is not fully configured for this portal")
+            raise err(503, "portal_auth_misconfigured", "Sign-in is not fully configured for this portal")
     if not oidc["client_id"]:
-        raise err(503, "portal_auth_misconfigured", "Cognito sign-in is not fully configured for this portal")
+        raise err(503, "portal_auth_misconfigured", "Sign-in is not fully configured for this portal")
     return {"mode": "oidc", "oidc": oidc}
+
+
+GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+
+
+@app.post("/v1/auth/token")
+async def google_token_exchange(request: Request):
+    """Authorization-code exchange for Google sign-in. Adds the client secret server-side and returns the ID token
+    (which is what this API verifies) as `access_token`. Only our own client ID and redirect URI are accepted."""
+    if AUTH_PROVIDER != "google":
+        raise err(404, "not_found", "Not available")
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+    form = urllib.parse.parse_qs((await request.body()).decode(), keep_blank_values=True)
+    one = lambda k: (form.get(k) or [""])[0]  # noqa: E731
+    if one("grant_type") != "authorization_code" or one("client_id") != os.environ.get("TAAD_GOOGLE_CLIENT_ID") \
+            or one("redirect_uri") != os.environ.get("TAAD_PORTAL_REDIRECT_URI") or not one("code") or not one("code_verifier"):
+        raise err(400, "invalid_request", "Invalid token request")
+    data = urllib.parse.urlencode({"grant_type": "authorization_code", "code": one("code"), "code_verifier": one("code_verifier"),
+                                   "client_id": one("client_id"), "redirect_uri": one("redirect_uri"),
+                                   "client_secret": os.environ["TAAD_GOOGLE_CLIENT_SECRET"]}).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(GOOGLE_TOKEN_URL, data=data), timeout=10) as r:  # noqa: S310
+            body = json.loads(r.read())
+    except (urllib.error.URLError, ValueError):
+        raise err(502, "token_exchange_failed", "Sign-in could not be completed") from None
+    if not body.get("id_token"):
+        raise err(502, "token_exchange_failed", "Sign-in could not be completed")
+    return {"access_token": body["id_token"], "token_type": "Bearer", "expires_in": min(int(body.get("expires_in", 3600)), 3600)}
 
 
 if _portal.is_dir():
