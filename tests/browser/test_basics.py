@@ -8,7 +8,7 @@ def test_opens_directly_and_uses_the_light_theme_even_in_a_dark_browser(as_user)
     page = as_user(None, "", scheme="dark")
     expect(page.get_by_role("heading", name="Command Center")).to_be_visible()
     assert page.get_by_role("button", name=re.compile(r"@t-bank|@t-health|@cloudseals")).count() == 0      # no seeded-user picker
-    assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(250, 249, 245)"
+    assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(245, 248, 252)"
     assert page.errors == []
 
 
