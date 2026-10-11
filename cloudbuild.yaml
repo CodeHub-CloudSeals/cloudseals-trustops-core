@@ -73,15 +73,28 @@ steps:
         ARGS=(run deploy ${_SERVICE} --region=${_REGION} --service-account=${_RUNTIME_SA}@$PROJECT_ID.iam.gserviceaccount.com
               --min-instances=1 --max-instances=1 --concurrency=40 --timeout=300 --allow-unauthenticated)
         if [ "${_CLAMAV}" = "true" ]; then
-          ENVS="$$ENVS|TAAD_CLAMD_HOST=127.0.0.1"
-          ARGS+=(--container=app --image=$$IMAGE --port=8080 --cpu=1 --memory=1Gi --depends-on=clamav --set-env-vars="$$ENVS")
-          [ -n "$$SECRETS" ] && ARGS+=(--set-secrets="$$SECRETS")
-          ARGS+=(--container=clamav --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/clamav:latest --cpu=1 --memory=3Gi
-                 --startup-probe=tcpSocket.port=3310,initialDelaySeconds=0,timeoutSeconds=5,periodSeconds=10,failureThreshold=60)
-        else
-          ARGS+=(--image=$$IMAGE --cpu=1 --memory=1Gi --set-env-vars="$$ENVS")
-          [ -n "$$SECRETS" ] && ARGS+=(--set-secrets="$$SECRETS")
+          # Multi-container service (app + ClamAV sidecar): written as a full service spec so exactly one container exposes a port.
+          export ENVS SECRETS IMAGE
+          python3 - > /workspace/service.json <<'PY'
+        import json, os
+        env = [dict(zip(("name", "value"), kv.split("=", 1))) for kv in os.environ["ENVS"][3:].split("|") if kv] + [{"name": "TAAD_CLAMD_HOST", "value": "127.0.0.1"}]
+        secrets = [{"name": kv.split("=", 1)[0], "valueFrom": {"secretKeyRef": {"name": kv.split("=", 1)[1].rsplit(":", 1)[0], "key": "latest"}}} for kv in os.environ["SECRETS"].split(",") if kv]
+        spec = {"apiVersion": "serving.knative.dev/v1", "kind": "Service",
+                "metadata": {"name": "${_SERVICE}", "annotations": {"run.googleapis.com/ingress": "all"}},
+                "spec": {"template": {"metadata": {"annotations": {
+                    "autoscaling.knative.dev/minScale": "1", "autoscaling.knative.dev/maxScale": "1",
+                    "run.googleapis.com/startup-cpu-boost": "true", "run.googleapis.com/container-dependencies": json.dumps({"app": ["clamav"]})}},
+                    "spec": {"serviceAccountName": "${_RUNTIME_SA}@$PROJECT_ID.iam.gserviceaccount.com", "containerConcurrency": 40, "timeoutSeconds": 300, "containers": [
+                        {"name": "app", "image": os.environ["IMAGE"], "ports": [{"containerPort": 8080}], "env": env + secrets, "resources": {"limits": {"cpu": "1", "memory": "1Gi"}}},
+                        {"name": "clamav", "image": "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/clamav:latest", "resources": {"limits": {"cpu": "1", "memory": "3Gi"}},
+                         "startupProbe": {"tcpSocket": {"port": 3310}, "timeoutSeconds": 5, "periodSeconds": 10, "failureThreshold": 60}}]}}}}
+        print(json.dumps(spec))
+        PY
+          gcloud run services replace /workspace/service.json --region=${_REGION}
+          exit 0
         fi
+        ARGS+=(--image=$$IMAGE --cpu=1 --memory=1Gi --set-env-vars="$$ENVS")
+        [ -n "$$SECRETS" ] && ARGS+=(--set-secrets="$$SECRETS")
         gcloud "$${ARGS[@]}"
   - id: smoke
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
