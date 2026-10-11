@@ -193,6 +193,14 @@ async function render() {
     el("span", {}, el("small", {}, "QUESTION CATALOG"), "v1.0.0 · 318 questions"),
     el("span", {}, el("small", {}, "EVIDENCE INTEGRITY"), state.cfg.mode === "dev" ? "Local hash chain" : "Environment profile"));
   contextBar.scrollLeft = 0;
+  // Pages that only CloudSeals staff (or specific staff roles) may use: show a clear message instead of an empty shell.
+  const CASE_ROLES = ["cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer"], AUDIT = ["cloudseals_admin", "cloudseals_platform_ops", "auditor_readonly"];
+  const ROUTE_ROLES = { cases: CASE_ROLES, case: CASE_ROLES, activity: AUDIT, "service-health": AUDIT, workspaces: [...CASE_ROLES, ...AUDIT], workspace: [...CASE_ROLES, ...AUDIT],
+    queue: ["cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor"], registrations: ["cloudseals_admin"], users: ["cloudseals_admin"], admin: ["cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor"] };
+  if (ROUTE_ROLES[name] && !roles.some((r) => ROUTE_ROLES[name].includes(r))) {
+    main.replaceChildren(moduleFrame("ACCESS", "You do not have access to this page", "This page is for CloudSeals staff. If you need it, ask a CloudSeals administrator to change your role.", el("p", {}, el("a", { class: "btn", href: "#/dashboard" }, "Back to the Command Center"))));
+    return;
+  }
   const view = routes[name] || routes.assessments;
   main.replaceChildren(el("p", {}, "Loading…"));
   try { await view(arg); } catch (e) { main.replaceChildren(el("div", { class: "card" }, el("h2", {}, "Something went wrong"), el("p", {}, e.message))); }
@@ -1109,6 +1117,8 @@ routes["service-health"] = async () => {
         card("Application state", h.state.last_save_error ? "bad" : h.state.durable ? "ok" : "warn", [["Storage", h.state.backend], ["Durable", h.state.durable ? "Yes" : "No (lost on restart)"],
           ["Saves since start", h.state.saves], ["Last save", h.state.last_save_at ? new Date(h.state.last_save_at * 1000).toLocaleTimeString() : "none yet"], h.state.last_save_error ? ["Last error", h.state.last_save_error] : null]),
         card("Evidence storage", h.evidence_store.backend === "local-disk" ? "warn" : "ok", [["Backend", h.evidence_store.backend]]),
+        card("Malware scanning", h.malware_scanner.probe ? (h.malware_scanner.probe.ok ? "ok" : "bad") : h.malware_scanner.configured ? "ok" : "warn",
+          [["Engine", h.malware_scanner.engine || "Basic byte checks only (no scanner configured)"], ["Uploads", h.malware_scanner.configured ? "Scanned before use; rejected if the scanner is down" : "Checked for known signatures only"]], probeLine(h.malware_scanner.probe)),
         card("AI model", h.model.probe ? (h.model.probe.ok ? "ok" : "bad") : h.model.configured ? "ok" : "off", [["Provider", h.model.provider || "none (deterministic agents only)"], ["Model", h.model.model_id || "n/a"]], probeLine(h.model.probe)),
         card("Evidence signing", h.evidence_signing.probe ? (h.evidence_signing.probe.ok ? "ok" : "bad") : h.evidence_signing.configured ? "ok" : "off",
           [["Signer", h.evidence_signing.configured ? "Cloud KMS" : "Local hash chain only"], ["Key version", h.evidence_signing.key_version ? h.evidence_signing.key_version.split("/").slice(-5).join("/") : "n/a"]], probeLine(h.evidence_signing.probe)),
@@ -1137,6 +1147,7 @@ const FLOW_NODES = {
     ["trustops.gap_analysis_agent", "Gap Analysis", "Compares validated use cases with a framework"],
     ["trustops.maturity_scorer", "Maturity Scorer", "Scores governance maturity on five principles"],
     ["trustops.roadmap_agent", "Roadmap Agent", "Turns validated gaps into a prioritised plan"],
+    ["trustops.architecture_overlay", "Architecture Overlay", "Draws the evidenced and the target architecture"],
     ["cloudseals.swaska.poc_drafter", "POC Drafter", "Drafts scope notes for the POC blueprint"]],
 };
 const FLOW_STATE = { waiting: "Waiting", running: "Running…", done: "Done", skipped: "Skipped", failed: "Failed" };
@@ -1175,6 +1186,7 @@ const CAPTIONS = {
   "trustops.gap_analysis_agent": ["Reading validated use cases…", "Comparing with framework requirements…", "Citing requirement IDs…"],
   "trustops.maturity_scorer": ["Reading validated use cases and gaps…", "Scoring five principles…", "Checking every score has evidence…"],
   "trustops.roadmap_agent": ["Reading validated gaps…", "Ordering by severity and dependency…", "Estimating effort and owners…"],
+  "trustops.architecture_overlay": ["Reading validated use cases…", "Drawing only what is evidenced…", "Laying out the target architecture…"],
   "cloudseals.swaska.poc_drafter": ["Reading the draft blueprint…", "Writing scope notes…"],
 };
 
@@ -1295,11 +1307,18 @@ routes["agent-flow"] = async () => {
       if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
       return { state: "done", lines: r.items.length ? [`${r.summary.total_items} items, about ${r.summary.total_effort_days} person-days`, ...r.items.slice(0, 4).map((i) => `${i.timeline_band} days: ${i.title}`)] : ["No usable roadmap items were returned."] };
     }, { minMs: 2200 });
-    if (!roles.some((r) => ["cloudseals_admin", "cloudseals_assessor"].includes(r))) skip(7, "Needs a CloudSeals assessor, after a reviewer has approved the report.");
+    if (!staffReview) skip(7, "Needs a CloudSeals reviewer to validate use cases first.");
+    else if (!inv.use_cases.some((u) => u.status === "VALIDATED")) skip(7, "No validated use cases yet.");
+    else await act(7, async () => {
+      const r = await api(`/v1/assessments/${assessmentId}/overlay/run`, { method: "POST" });
+      if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
+      return r.overlay ? { state: "done", lines: [`${r.overlay.current.nodes.length} nodes today, ${r.overlay.target.nodes.length} in the target (needs review)`, ...r.overlay.key_differences.slice(0, 3)] } : { state: "skipped", lines: [r.note] };
+    }, { minMs: 2200 });
+    if (!roles.some((r) => ["cloudseals_admin", "cloudseals_assessor"].includes(r))) skip(8, "Needs a CloudSeals assessor, after a reviewer has approved the report.");
     else {
       const bp = (await api(`/v1/assessments/${assessmentId}/poc-blueprints`)).items[0];
-      if (!bp) skip(7, "No draft POC blueprint yet. An assessor creates one from the approved report.");
-      else await act(7, async () => {
+      if (!bp) skip(8, "No draft POC blueprint yet. An assessor creates one from the approved report.");
+      else await act(8, async () => {
         const r = await api(`/v1/assessments/${assessmentId}/poc-blueprints/${bp.blueprint_id}/draft-notes`, { method: "POST" });
         return { state: "done", lines: [r.scope_summary, ...r.open_questions.map((q) => `Open question: ${q}`)] };
       });
@@ -1324,7 +1343,7 @@ routes["agent-flow"] = async () => {
       await api(g.upload_url, { method: "PUT", body: data.buffer, headers: { "Content-Type": "application/octet-stream" } });
       toast("Demo assessment created"); await routes["agent-flow"]();
     }) }, "Create a demo assessment with sample evidence") : "";
-    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (8 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn));
+    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (9 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn));
   }
   drawControls(); draw();
   main.replaceChildren(moduleFrame("AGENTS · LIVE VIEW", "Agent Flow", "Press Run and watch each agent pick up the work, do its part and hand the result to the next one.",
@@ -1427,6 +1446,31 @@ function roadmapPanel(aid, inv, canReview, ready, redraw) {
       : el("p", { class: "empty-state" }, ready ? "No roadmap yet." : "Validate a gap or the maturity score to unlock the roadmap."));
 }
 
+
+function overlayPanel(aid, inv, canReview, validatedUc, redraw) {
+  const o = inv.overlay;
+  const run = el("button", { disabled: !validatedUc, title: validatedUc ? "" : "Validate at least one use case first", onclick: safe(async (e) => {
+    e.currentTarget.disabled = true; e.currentTarget.textContent = "Drawing…";
+    const r = await api(`/v1/assessments/${aid}/overlay/run`, { method: "POST" });
+    useCaseNote = r.mode === "unavailable" ? r.note : r.overlay ? "Architecture diagrams drafted for review." : r.note;
+    await redraw();
+  }) }, o ? "Redraw architecture" : "Draw architecture");
+  const img = (svg, alt) => el("img", { class: "overlay-img", alt, src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}` });
+  const body = o ? el("div", {}, el("div", { class: "row" }, statusChip(o.status)),
+    el("div", { class: "overlay-grid" }, el("figure", {}, img(o.current_svg, "Current architecture, drawn only from what the documents evidence"), el("figcaption", {}, "Current: dashed boxes are things the documents do not evidence")),
+      el("figure", {}, img(o.target_svg, "Recommended target architecture organised around the five principles"), el("figcaption", {}, "Target: organised around the five TrustOps principles"))),
+    o.principles_missing_from_target.length ? el("p", { class: "module-note" }, `The target diagram does not show: ${o.principles_missing_from_target.join(", ")}.`) : "",
+    o.current.nodes.some((n) => n.kind === "unknown") ? el("p", { class: "help" }, "Items marked unknown are not evidenced in the documents and are drawn dashed. Confirm them with the customer or remove them.") : "",
+    o.gap_commentary.split("\n\n").map((p) => el("p", { class: "uc-desc" }, p)),
+    el("span", { class: "eyebrow" }, "KEY DIFFERENCES"), el("ul", { class: "fw-controls" }, o.key_differences.map((d) => el("li", {}, d))),
+    o.status !== "UNREVIEWED" ? el("p", { class: "help" }, `${STATUS_LABEL[o.status]} by ${o.reviewed_by}: ${o.review_reason}`)
+      : canReview ? reviewControls("Architecture overlay", async (status, reason) => { await api(`/v1/assessments/${aid}/overlay`, { method: "PATCH", body: { status, reason } }); toast(`Architecture ${status}`); redraw(); }) : "")
+    : el("p", { class: "empty-state" }, validatedUc ? "No diagram yet." : "Validate a use case to unlock the architecture overlay.");
+  return el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "OPTIONAL · ARCHITECTURE OVERLAY"), el("h3", {}, "Current and target architecture"))),
+    el("p", { class: "help" }, "Two diagrams drawn by the platform from a structured description. Nothing is shown as existing unless the documents evidence it. It joins the report once validated."),
+    el("div", { class: "row" }, run), body);
+}
+
 async function reportPanel(aid) {
   const st = await api(`/v1/assessments/${aid}/diagnostic-report?format=json`);
   const dlBtn = (label, qs, cls = "") => el("button", { class: cls, onclick: safe(async (e) => { e.currentTarget.disabled = true; await dl(`/v1/assessments/${aid}/diagnostic-report${qs}`, `diagnostic-report-${st.status}.html`); e.currentTarget.disabled = false; }) }, label);
@@ -1439,8 +1483,10 @@ async function reportPanel(aid) {
 function pipelineStepper(inv) {
   const v = (xs) => (xs || []).some((x) => x.status === "VALIDATED");
   const steps = [["Inventory", v(inv.use_cases)], ["Gap analysis", v(inv.gaps)], ["Maturity", inv.maturity?.status === "VALIDATED"], ["Roadmap", v(inv.roadmap)]];
+  const ov = inv.overlay?.status === "VALIDATED";
   return el("ol", { class: "pipe-steps", "aria-label": "Diagnostic pipeline" }, steps.map(([n, done], i) => el("li", { class: done ? "is-done" : "" }, el("span", {}, done ? "✓" : String(i + 1)), n)),
-    el("li", { class: steps.every(([, d]) => d) ? "is-done" : "" }, el("span", {}, steps.every(([, d]) => d) ? "✓" : "5"), "Report"));
+    el("li", { class: steps.every(([, d]) => d) ? "is-done" : "" }, el("span", {}, steps.every(([, d]) => d) ? "✓" : "5"), "Report"),
+    el("li", { class: `optional${ov ? " is-done" : ""}` }, el("span", {}, ov ? "✓" : "+"), "Architecture (optional)"));
 }
 
 routes["use-cases"] = async (aidArg) => {
@@ -1483,7 +1529,7 @@ routes["use-cases"] = async (aidArg) => {
     gaps.length ? el("div", { class: "uc-list" }, gaps.map((g) => gapCard(aid, g, canReview, redraw))) : el("p", { class: "empty-state" }, validated ? "No gaps recorded yet. Run the analysis." : "Validate a use case to unlock gap analysis."))
     : el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "STEP 2 · GAP ANALYSIS"), el("p", { class: "help" }, inv.gaps_note || "Gap analysis is prepared by CloudSeals reviewers."));
   const validatedGaps = inv.gaps.some((g) => g.status === "VALIDATED");
-  const staffPanels = canReview ? [maturityPanel(aid, inv, canReview, validated > 0, redraw), roadmapPanel(aid, inv, canReview, validatedGaps || inv.maturity?.status === "VALIDATED", redraw), await reportPanel(aid)] : [];
+  const staffPanels = canReview ? [maturityPanel(aid, inv, canReview, validated > 0, redraw), roadmapPanel(aid, inv, canReview, validatedGaps || inv.maturity?.status === "VALIDATED", redraw), overlayPanel(aid, inv, canReview, validated > 0, redraw), await reportPanel(aid)] : [];
   main.replaceChildren(moduleFrame("DIAGNOSIS · AI GOVERNANCE STUDIO", "Diagnostic studio", "From documents to a reviewed inventory, framework gaps, maturity, roadmap and report. Every step is a draft until a CloudSeals reviewer validates it.",
     canReview ? pipelineStepper(inv) : "", useCasePanel, gapPanel, ...staffPanels));
 };

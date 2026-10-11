@@ -1,6 +1,6 @@
 # TAAD project completion status
 
-**Status: deployed to GCP `trustops-uat` (Cloud Run, europe-west1) but not production-ready; sign-in needs one manual OAuth redirect URI, Vertex AI is blocked by a billing hold.** The customer-call rehearsal and local engineering foundation are ready. A six-agent deterministic LedgerSight sandbox runtime is now implemented, but AWS DEV deployment, hosted UAT, and the production release gates in `TAAD_END_GOAL.md` remain open.
+**Status: live at https://trustops.cloudseals.com (GCP `trustops-uat`, Cloud Run service `trustops-ui`, europe-west1) in the DEV environment profile. Not production-ready: Vertex AI is blocked by a billing hold, single instance, sandbox workflow runtime only, frameworks pending legal review.** The customer-call rehearsal and local engineering foundation are ready. A six-agent deterministic LedgerSight sandbox runtime is now implemented, but AWS DEV deployment, hosted UAT, and the production release gates in `TAAD_END_GOAL.md` remain open.
 
 ## Completed in this workspace
 
@@ -46,3 +46,5 @@
 The AWS target creates cost-bearing resources including NAT, ALB, Aurora Serverless and WAF; the default budget alarm is USD 300/month. A real plan must be reviewed before apply. **No plan or apply against AWS has run.** Production readiness is not established.
 
 - **GCP (Oct 2026):** `taad-api` on Cloud Run (`min=max=1`), state in GCS (Cloud SQL blocked by org policy `sql.restrictPublicIp`), evidence in GCS, Cloud KMS signing key, Google sign-in, Vertex AI client (not yet usable: project billing returns `Lightning dunning decision is deny`). Added from TrustOps Diagnostic Studio: AI use-case inventory agent, framework gap-analysis agent, 5-framework reference library (pending legal review). See `docs/UNIFIED_END_GOAL.md` and `docs/GCP_DEPLOYMENT.md`.
+
+- **Verification (Oct 2026):** 170 unit/API tests, 63 Playwright browser tests (every page, the full reviewer pipeline, approvals, downloads, accessibility names, layout at 390/1440/2000 px), 18 deployed-site smoke tests including a real redirect to Google sign-in, and the real Cloud KMS key's signature verified with the app's verifier. Not verified: real Gemini calls (billing), Google sign-in end to end (cannot be automated), live ClamAV scanning (opt-in).

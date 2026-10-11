@@ -25,6 +25,8 @@ substitutions:
   _LLM_PROVIDER: vertex          # vertex | "" (deterministic agents only)
   _VERTEX_MODEL: gemini-2.5-flash
   _VERTEX_LOCATION: europe-west1
+  _CLAMAV: "false"               # "true" adds a ClamAV sidecar and scans every upload (needs 4 GiB / 2 vCPU per instance)
+  _CLAMAV_IMAGE: clamav/clamav:1.4
   _KMS_KEY_VERSION: ""           # projects/.../cryptoKeyVersions/1 ; empty = local hash chain only
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -44,6 +46,17 @@ steps:
   - id: push
     name: gcr.io/cloud-builders/docker
     args: [push, --all-tags, "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/api"]
+  - id: mirror-clamav
+    name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        if [ "${_CLAMAV}" = "true" ]; then
+          docker pull ${_CLAMAV_IMAGE}
+          docker tag ${_CLAMAV_IMAGE} ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/clamav:latest
+          docker push ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/clamav:latest
+        fi
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
@@ -51,16 +64,25 @@ steps:
       - -c
       - |
         set -euo pipefail
+        IMAGE=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/api:${BUILD_ID}
+        ENVS="^|^TAAD_ENV=${_ENV}|TAAD_AUTH_MODE=oidc|TAAD_AUTH_PROVIDER=${_AUTH_PROVIDER}|TAAD_OBJECT_BACKEND=gcs|TAAD_BUCKET_EVID=${_BUCKET}|TAAD_STATE_GCS_URI=gs://${_STATE_BUCKET}/state.json|GOOGLE_CLOUD_PROJECT=$PROJECT_ID|TAAD_GOOGLE_CLIENT_ID=${_GOOGLE_CLIENT_ID}|TAAD_FIRST_ADMIN_EMAIL=${_FIRST_ADMIN_EMAIL}|TAAD_STAFF_EMAIL_DOMAINS=${_STAFF_EMAIL_DOMAINS}|TAAD_OIDC_ISSUER=${_OIDC_ISSUER}|TAAD_OIDC_JWKS_URL=${_OIDC_JWKS_URL}|TAAD_OIDC_AUDIENCE=${_OIDC_AUDIENCE}|TAAD_PORTAL_AUTHORIZE_URL=${_PORTAL_AUTHORIZE_URL}|TAAD_PORTAL_TOKEN_URL=${_PORTAL_TOKEN_URL}|TAAD_PORTAL_LOGOUT_URL=${_PORTAL_LOGOUT_URL}|TAAD_PORTAL_CLIENT_ID=${_PORTAL_CLIENT_ID}|TAAD_PORTAL_REDIRECT_URI=${_PORTAL_REDIRECT_URI}|TAAD_LLM_PROVIDER=${_LLM_PROVIDER}|TAAD_VERTEX_MODEL=${_VERTEX_MODEL}|TAAD_VERTEX_LOCATION=${_VERTEX_LOCATION}|TAAD_KMS_SIGNING_KEY_VERSION=${_KMS_KEY_VERSION}"
         SECRETS=""
         [ -n "${_GOOGLE_SECRET}" ] && SECRETS="TAAD_GOOGLE_CLIENT_SECRET=${_GOOGLE_SECRET}:latest"
-        gcloud run deploy ${_SERVICE} \
-          --region=${_REGION} \
-          --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/api:${BUILD_ID} \
-          --service-account=${_RUNTIME_SA}@$PROJECT_ID.iam.gserviceaccount.com \
-          --min-instances=1 --max-instances=1 --cpu=1 --memory=1Gi --concurrency=40 --timeout=300 \
-          --allow-unauthenticated \
-          $${SECRETS:+--set-secrets="$$SECRETS"} \
-          --set-env-vars="^|^TAAD_ENV=${_ENV}|TAAD_AUTH_MODE=oidc|TAAD_AUTH_PROVIDER=${_AUTH_PROVIDER}|TAAD_OBJECT_BACKEND=gcs|TAAD_BUCKET_EVID=${_BUCKET}|TAAD_STATE_GCS_URI=gs://${_STATE_BUCKET}/state.json|GOOGLE_CLOUD_PROJECT=$PROJECT_ID|TAAD_GOOGLE_CLIENT_ID=${_GOOGLE_CLIENT_ID}|TAAD_FIRST_ADMIN_EMAIL=${_FIRST_ADMIN_EMAIL}|TAAD_STAFF_EMAIL_DOMAINS=${_STAFF_EMAIL_DOMAINS}|TAAD_OIDC_ISSUER=${_OIDC_ISSUER}|TAAD_OIDC_JWKS_URL=${_OIDC_JWKS_URL}|TAAD_OIDC_AUDIENCE=${_OIDC_AUDIENCE}|TAAD_PORTAL_AUTHORIZE_URL=${_PORTAL_AUTHORIZE_URL}|TAAD_PORTAL_TOKEN_URL=${_PORTAL_TOKEN_URL}|TAAD_PORTAL_LOGOUT_URL=${_PORTAL_LOGOUT_URL}|TAAD_PORTAL_CLIENT_ID=${_PORTAL_CLIENT_ID}|TAAD_PORTAL_REDIRECT_URI=${_PORTAL_REDIRECT_URI}|TAAD_LLM_PROVIDER=${_LLM_PROVIDER}|TAAD_VERTEX_MODEL=${_VERTEX_MODEL}|TAAD_VERTEX_LOCATION=${_VERTEX_LOCATION}|TAAD_KMS_SIGNING_KEY_VERSION=${_KMS_KEY_VERSION}"
+        # The API keeps its state as a single-writer snapshot and its rate limiter in memory: exactly one instance.
+        # Authentication is enforced by the app (Google ID token on every API call), so the service itself is publicly reachable.
+        ARGS=(run deploy ${_SERVICE} --region=${_REGION} --service-account=${_RUNTIME_SA}@$PROJECT_ID.iam.gserviceaccount.com
+              --min-instances=1 --max-instances=1 --concurrency=40 --timeout=300 --allow-unauthenticated)
+        if [ "${_CLAMAV}" = "true" ]; then
+          ENVS="$$ENVS|TAAD_CLAMD_HOST=127.0.0.1"
+          ARGS+=(--container=app --image=$$IMAGE --port=8080 --cpu=1 --memory=1Gi --depends-on=clamav --set-env-vars="$$ENVS")
+          [ -n "$$SECRETS" ] && ARGS+=(--set-secrets="$$SECRETS")
+          ARGS+=(--container=clamav --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/clamav:latest --cpu=1 --memory=3Gi
+                 --startup-probe=tcpSocket.port=3310,initialDelaySeconds=0,timeoutSeconds=5,periodSeconds=10,failureThreshold=60)
+        else
+          ARGS+=(--image=$$IMAGE --cpu=1 --memory=1Gi --set-env-vars="$$ENVS")
+          [ -n "$$SECRETS" ] && ARGS+=(--set-secrets="$$SECRETS")
+        fi
+        gcloud "$${ARGS[@]}"
   - id: smoke
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash

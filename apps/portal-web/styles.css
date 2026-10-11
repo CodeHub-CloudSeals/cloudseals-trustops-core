@@ -332,3 +332,7 @@ a.pack-card:hover{border-color:#e0a083;box-shadow:0 6px 18px rgba(31,30,29,.06)}
 .health-grid{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}.health-card{margin:0}.health-head{display:flex;align-items:center;gap:10px}.health-head h3{margin:0}
 .hdot{width:10px;height:10px;border-radius:50%;background:#c4c1b2;flex:none}.hdot.ok{background:#2f7d57;box-shadow:0 0 0 4px rgba(47,125,87,.15)}.hdot.warn{background:#d9a441;box-shadow:0 0 0 4px rgba(217,164,65,.18)}.hdot.bad{background:#b3382c;box-shadow:0 0 0 4px rgba(179,56,44,.16)}
 .health-list{margin:12px 0 0;display:grid;gap:8px}.health-list>div{display:flex;justify-content:space-between;gap:12px;font-size:.84rem;border-bottom:1px solid #efede4;padding-bottom:6px}.health-list dt{color:#6b6a63}.health-list dd{margin:0;font-weight:600;color:#2b2a27;text-align:right;overflow-wrap:anywhere}
+
+.overlay-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px;margin:12px 0}.overlay-grid figure{margin:0;border:1px solid var(--bd);border-radius:12px;background:#faf9f5;padding:10px;overflow:auto}
+.overlay-img{max-width:100%;height:auto;display:block}.overlay-grid figcaption{margin-top:8px;color:#6b6a63;font-size:.78rem}
+.pipe-steps li.optional{border-style:dashed;background:transparent}.pipe-steps li.optional.is-done{border-style:solid;background:#eef6f1}

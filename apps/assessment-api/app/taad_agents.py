@@ -21,6 +21,7 @@ CLAIM = re.compile(r"\b(legally compliant|compliant with|is compliant|are compli
 QLINE = re.compile(r"^\s*(Q-[A-Z]+-\d{3})\s*[:=]\s*(.+?)\s*$", re.M)
 INVENTORY, GAP = "trustops.inventory_agent", "trustops.gap_analysis_agent"
 MATURITY, ROADMAP, REPORT = "trustops.maturity_scorer", "trustops.roadmap_agent", "trustops.report_writer"
+OVERLAY = "trustops.architecture_overlay"
 EXTRACTION, FINDINGS, DRAFTER, APPROVAL = "cloudseals.swaska.evidence_extractor", "cloudseals.swaska.findings_summarizer", \
     "cloudseals.swaska.poc_drafter", "trustops.approval_summarizer"
 

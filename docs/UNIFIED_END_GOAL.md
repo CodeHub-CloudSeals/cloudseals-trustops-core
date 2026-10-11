@@ -29,5 +29,8 @@ Merge what is worth keeping from **TrustOps Diagnostic Studio** (`cs-trustops-st
 - **Diagnostic report**: deterministic HTML (every string escaped) from reviewer-validated material only, `DRAFT` until use cases, maturity and roadmap are validated; optional AI-drafted narrative.
 - **Studio page** (`#/use-cases`): 5-step pipeline with reviewer gates; **TrustOps hub** strip lists workflow packs and tools.
 
+- **Architecture overlay**: current vs target architecture as structured graphs rendered by the platform (no model-supplied markup); nodes without evidence are drawn as unknowns; joins the report once validated.
+- **Admin surface**: Users, Cases, Audit logs (filter/export), Service health (live probes), read-only customer workspaces.
+
 ## Deliberately not in this pass
-Architecture-overlay agent, Firestore, the Next.js UI. The old nine services keep running untouched until you decide to retire them.
+Firestore and the Next.js UI (their functions were rebuilt in the portal). The old services (`trustops-api-gateway`, agents) keep running untouched; they no longer receive traffic from the UI.

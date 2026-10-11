@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from question_engine import candidate_findings, eligible_questions, load_registry
 from question_engine.branching import is_eligible
 
-from . import llm, persist, studio, swaska, taad_agents, trustops_runtime, use_cases
+from . import llm, persist, scanner, studio, swaska, taad_agents, trustops_runtime, use_cases
 from .evidence import inspect, make_store
 from .security import AUTH_MODE, AUTH_PROVIDER, CLOUDSEALS_ROLES, ENV, issue_token, verify_identity
 from .store import Store
@@ -456,6 +456,15 @@ async def upload_content(aid: str, eid: str, request: Request, p: Principal = De
         if len(data) > min(declared, MAX_UPLOAD):
             break
     verdict = inspect(ev["content_type"], data, ev["sha256"], declared)
+    av = scanner.from_env()
+    if verdict["state"] == "clean" and av is not None:       # mandatory when configured: no verdict means no evidence
+        try:
+            is_clean, detail = av.scan(data)
+        except scanner.ScannerError:
+            verdict = {**verdict, "state": "rejected", "reason": "malware_scanner_unavailable"}
+        else:
+            if not is_clean:
+                verdict = {**verdict, "state": "infected", "reason": f"malware_detected: {detail}"[:120]}
     ev.update(state=verdict["state"], reason=verdict["reason"], injection_flagged=verdict["injection_flagged"])
     if verdict["state"] == "clean":
         if hasattr(OBJECTS, "promote"):
@@ -760,6 +769,7 @@ def _inv(aid: str) -> dict:
     inv = STORE.inventory.setdefault(aid, {"use_cases": [], "gaps": []})
     inv.setdefault("maturity", None)
     inv.setdefault("roadmap", [])
+    inv.setdefault("overlay", None)
     return inv
 
 
@@ -808,13 +818,21 @@ def run_inventory(aid: str, body: InventoryRunRequest, p: Principal = Depends(pr
             "agent_id": taad_agents.INVENTORY, "advisory_only": True, "use_cases": inv["use_cases"]}
 
 
+def _overlay_view(o: Optional[dict]) -> Optional[dict]:
+    if not o:
+        return None
+    return {**o, "current_svg": studio.render_svg(o["current"], "Current architecture (as evidenced)"),
+            "target_svg": studio.render_svg(o["target"], "Recommended target architecture")}
+
+
 @app.get("/v1/assessments/{aid}/inventory")
 def get_inventory(aid: str, p: Principal = Depends(principal)):
     get_assessment(p, aid)
     inv = _inv(aid)
     staff = p.is_staff   # gaps, maturity and the roadmap are reviewer material until a report is published
     return {"use_cases": inv["use_cases"], "gaps": inv["gaps"] if staff else [], "maturity": inv["maturity"] if staff else None,
-            "roadmap": inv["roadmap"] if staff else [], "gaps_note": None if staff else "Gap analysis, maturity and roadmap follow reviewer approval"}
+            "roadmap": inv["roadmap"] if staff else [], "overlay": _overlay_view(inv["overlay"]) if staff else None,
+            "gaps_note": None if staff else "Gap analysis, maturity and roadmap follow reviewer approval"}
 
 
 @app.patch("/v1/assessments/{aid}/inventory/use-cases/{uid}")
@@ -922,6 +940,37 @@ def review_roadmap_item(aid: str, item_id: str, body: ReviewItem, p: Principal =
     return it
 
 
+@app.post("/v1/assessments/{aid}/overlay/run")
+def run_overlay(aid: str, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    agent_throttle(p, taad_agents.OVERLAY)
+    inv = _inv(aid)
+    ucs = [u for u in inv["use_cases"] if u["status"] == "VALIDATED"]
+    if not ucs:
+        raise err(409, "no_validated_use_cases", "Validate at least one AI use case before drawing the architecture")
+    result = studio.run_overlay(SWASKA_CLIENT, ucs, [g for g in inv["gaps"] if g["status"] == "VALIDATED"])
+    with STORE.lock:
+        if result["overlay"] and not (inv["overlay"] and inv["overlay"]["status"] == "VALIDATED"):
+            inv["overlay"] = result["overlay"]
+        audit(p, "agent.overlay", aid)
+    summary = {k: v for k, v in result.items() if k != "overlay"}
+    return {**summary, "agent_id": taad_agents.OVERLAY, "advisory_only": True, "overlay": _overlay_view(inv["overlay"])}
+
+
+@app.patch("/v1/assessments/{aid}/overlay")
+def review_overlay(aid: str, body: ReviewItem, p: Principal = Depends(principal)):
+    get_assessment(p, aid)
+    require(p, *STAFF_REVIEW)
+    with STORE.lock:
+        o = _inv(aid)["overlay"]
+        if not o:
+            raise err(404, "not_found", "No architecture overlay yet")
+        o.update(status=body.status.upper(), reviewed_by=p.sub, review_reason=body.reason, reviewed_at=time.time())
+        audit(p, f"overlay.{body.status}", aid)
+    return _overlay_view(o)
+
+
 @app.get("/v1/assessments/{aid}/diagnostic-report")
 def diagnostic_report(aid: str, narrative: bool = False, format: Literal["html", "json"] = "html", p: Principal = Depends(principal)):
     """Reviewer-validated material only. HTML is delivered as a download (the portal CSP forbids rendering it in place)."""
@@ -937,7 +986,8 @@ def diagnostic_report(aid: str, narrative: bool = False, format: Literal["html",
     if format == "json":
         return {"status": status, "missing": missing, "facts": facts}
     story = studio.draft_narrative(SWASKA_CLIENT, facts) if narrative else None
-    doc, digest = studio.build_report_html(a, (STORE.tenants.get(a["tenant_id"]) or {}).get("name") or a["tenant_id"], ucs, gaps, mat, road, story, p.sub)
+    ov = inv["overlay"] if inv["overlay"] and inv["overlay"]["status"] == "VALIDATED" else None
+    doc, digest = studio.build_report_html(a, (STORE.tenants.get(a["tenant_id"]) or {}).get("name") or a["tenant_id"], ucs, gaps, mat, road, story, p.sub, ov)
     audit(p, "report.diagnostic", f"{aid}/{digest[:12]}")
     name = re.sub(r"[^A-Za-z0-9_-]+", "_", a["ai_system_name"])[:60] or "assessment"
     return Response(doc, media_type="text/html; charset=utf-8", headers={
@@ -1865,6 +1915,9 @@ def service_health(probe: bool = False, p: Principal = Depends(principal)):
                         "auth": AUTH_PROVIDER or AUTH_MODE},
             "state": {"backend": state_backend, "durable": state_backend != "memory", **persist.STATUS},
             "evidence_store": {"backend": os.environ.get("TAAD_OBJECT_BACKEND") or "local-disk"},
+            "malware_scanner": {"configured": scanner.from_env() is not None, "engine": "ClamAV" if scanner.from_env() else None,
+                                **({"probe": timed(lambda: scanner.from_env().ping() or (_ for _ in ()).throw(RuntimeError("no PONG from clamd")))}
+                                   if probe and scanner.from_env() else {})},
             "model": model, "evidence_signing": signing,
             "runtime": {"mode": "sandbox" if runtime_enabled() else "unavailable"},
             "agents": {"calls_last_24h": agent_calls, "advisory_agents": len(taad_agents.AGENTS)},

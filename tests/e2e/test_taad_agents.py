@@ -24,7 +24,7 @@ class Fake:
 def test_registry_lists_four_new_advisory_agents(env):
     c, h = env
     items = c.get("/v1/agents", headers=h("admin@t-bank")).json()["items"]
-    assert len(items) == 9
+    assert len(items) == 10
     for a in items:
         assert "EXECUTE_ACTION" in a["prohibited_capabilities"] and "WRITE_ANSWER" in a["prohibited_capabilities"]
         assert not any(t.startswith(("write", "publish", "execute", "approve", "issue")) for t in a["tool_allowlist"])

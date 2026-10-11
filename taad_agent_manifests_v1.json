@@ -192,6 +192,27 @@
         "executive_summary",
         "key_themes"
       ]
+    },
+    {
+      "agent_id": "trustops.architecture_overlay",
+      "purpose": "Describe the evidenced current architecture and a recommended target as small graphs; systems the data does not evidence are drawn as unknowns, and the diagrams are rendered by the platform (never model-supplied markup)",
+      "approved_capabilities": [
+        "READ_VALIDATED_USE_CASES",
+        "READ_VALIDATED_GAPS",
+        "SUGGEST_ARCHITECTURE_GRAPH"
+      ],
+      "tool_allowlist": [
+        "get_validated_use_cases",
+        "get_validated_gaps"
+      ],
+      "model_route": "structured-deep",
+      "fallback": "None: returns no diagram and says a model is required",
+      "output_item_required": [
+        "current",
+        "target",
+        "gap_commentary",
+        "key_differences"
+      ]
     }
   ]
 }

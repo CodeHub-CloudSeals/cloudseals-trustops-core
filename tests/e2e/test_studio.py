@@ -127,3 +127,75 @@ def test_pipeline_end_to_end_through_the_api(env, monkeypatch):
     assert c.get(f"/v1/assessments/{aid}/diagnostic-report", headers=h(cust)).status_code == 403
     assert c.get(f"/v1/assessments/{aid}/diagnostic-report", headers=h("admin@t-health")).status_code == 404
     assert json.dumps(use_cases.FRAMEWORKS["eu_ai_act"]["framework"])
+
+
+def graph(nodes, edges):
+    return {"nodes": nodes, "edges": edges}
+
+
+def n(i, label, kind="system", **kw):
+    return {"id": i, "label": label, "kind": kind, **kw}
+
+
+GOOD_OVERLAY = {
+    "current": graph([n("App", "Credit app", evidence_refs=["uc_1"]), n("Model", "Scoring model", "model", evidence_refs=["uc_1"]), n("Vendor", "Hosted LLM", "model")],
+                     [{"from": "App", "to": "Model"}, {"from": "Model", "to": "Vendor", "dashed": True}]),
+    "target": graph([n("App", "Credit app"), n("Abs", "Model abstraction API", principle="P1"), n("Rules", "Policy rules engine", principle="P2"),
+                     n("Reg", "Model registry", "control", principle="P3"), n("Fab", "Signed evidence store", "control", principle="P4")],
+                    [{"from": "App", "to": "Abs"}, {"from": "Abs", "to": "Rules"}, {"from": "Abs", "to": "Reg"}, {"from": "Rules", "to": "Fab"}]),
+    "gap_commentary": "Calls go straight to a vendor.\n\nThere is no audit trail.", "key_differences": ["Current: direct vendor call -> Target: abstraction", "Current: no audit -> Target: signed evidence", "Current: ad hoc -> Target: registry"]}
+
+
+def test_overlay_only_draws_what_the_data_evidences_and_rejects_unsafe_graphs():
+    r = studio.run_overlay(Fake(GOOD_OVERLAY), UCS, GAPS)["overlay"]
+    kinds = {x["id"]: x["kind"] for x in r["current"]["nodes"]}
+    assert kinds["App"] == "system" and kinds["Model"] == "model"
+    assert kinds["Vendor"] == "unknown" and r["current"]["nodes"][2]["assumed"] is True      # no evidence cited -> drawn as an unknown, never as fact
+    assert r["principles_missing_from_target"] == ["P5"] and r["status"] == "UNREVIEWED"
+    bad_graphs = [
+        {**GOOD_OVERLAY, "current": graph([n("A", "x"), n("B", "y")], [])},                                              # too small
+        {**GOOD_OVERLAY, "current": graph([n("A b", "x"), n("B", "y"), n("C", "z")], [])},                               # id with a space
+        {**GOOD_OVERLAY, "current": graph([n("A", "<b>x</b>"), n("B", "y"), n("C", "z")], [])},                          # markup in a label
+        {**GOOD_OVERLAY, "current": graph([n("A", "x"), n("B", "y"), n("C", "z")], [{"from": "A", "to": "Ghost"}])},     # edge to nowhere
+        {**GOOD_OVERLAY, "current": graph([n("A", "x"), n("A", "y"), n("C", "z")], [])},                                  # duplicate id
+        {**GOOD_OVERLAY, "current": graph([n("A", "x", "weird"), n("B", "y"), n("C", "z")], [])},                        # unknown kind
+        {**GOOD_OVERLAY, "gap_commentary": "The bank is fully compliant."},
+        {**GOOD_OVERLAY, "key_differences": ["only one"]}, "not json"]
+    for bad in bad_graphs:
+        out = studio.run_overlay(Fake(bad), UCS, GAPS)
+        assert out["overlay"] is None and out["rejected"] == 1, str(bad)[:80]
+    assert studio.run_overlay(None, UCS, GAPS)["mode"] == "unavailable"
+
+
+def test_svg_is_self_contained_escaped_and_handles_cycles():
+    g = graph([n("A", "Say <script>alert(1)</script> & more"), n("B", "Second"), n("C", "Third")],
+              [{"from": "A", "to": "B"}, {"from": "B", "to": "C"}, {"from": "C", "to": "A", "dashed": True}])
+    svg = studio.render_svg(g, "Title <x>")
+    assert svg.startswith("<svg") and "<script" not in svg and "&lt;script" in svg           # the label is shown as text, never executed
+    assert "href" not in svg and "onload" not in svg and "http://www.w3.org" not in svg.replace("http://www.w3.org/2000/svg", "")
+    assert svg.count("<rect") >= 3 + 1 and "stroke-dasharray" in svg
+
+
+def test_overlay_endpoints_review_gate_and_report(env, monkeypatch):
+    c, h = env
+    rev, cust = "reviewer@cloudseals", "admin@t-bank"
+    aid = new_assessment(c, h, cust)
+    upload(c, h, aid, DOC.encode())
+    monkeypatch.setattr(main, "SWASKA_CLIENT", Fake({"use_cases": [uc()]}))
+    uid = c.post(f"/v1/assessments/{aid}/inventory/run", headers=h(cust), json={}).json()["use_cases"][0]["use_case_id"]
+    assert c.post(f"/v1/assessments/{aid}/overlay/run", headers=h(rev)).status_code == 409
+    ok = {"status": "validated", "reason": "Checked"}
+    c.patch(f"/v1/assessments/{aid}/inventory/use-cases/{uid}", headers=h(rev), json=ok)
+    overlay = json.loads(json.dumps(GOOD_OVERLAY).replace("uc_1", uid))
+    monkeypatch.setattr(main, "SWASKA_CLIENT", Fake(overlay))
+    assert c.post(f"/v1/assessments/{aid}/overlay/run", headers=h(cust)).status_code == 403
+    r = c.post(f"/v1/assessments/{aid}/overlay/run", headers=h(rev)).json()
+    assert r["overlay"]["status"] == "UNREVIEWED" and r["overlay"]["current_svg"].startswith("<svg") and r["overlay"]["target_svg"].startswith("<svg")
+    rep = c.get(f"/v1/assessments/{aid}/diagnostic-report", headers=h(rev)).text
+    assert "Architecture overlay" not in rep                                      # not in the report until a reviewer validates it
+    assert c.patch(f"/v1/assessments/{aid}/overlay", headers=h(cust), json=ok).status_code == 403
+    c.patch(f"/v1/assessments/{aid}/overlay", headers=h(rev), json=ok)
+    rep = c.get(f"/v1/assessments/{aid}/diagnostic-report", headers=h(rev)).text
+    assert "Architecture overlay" in rep and "data:image/svg+xml;base64," in rep and "<script" not in rep
+    assert c.post(f"/v1/assessments/{aid}/overlay/run", headers=h(rev)).json()["overlay"]["status"] == "VALIDATED"      # a validated diagram is kept
+    assert c.get(f"/v1/assessments/{aid}/inventory", headers=h(cust)).json()["overlay"] is None
