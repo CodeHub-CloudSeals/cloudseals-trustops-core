@@ -13,7 +13,7 @@ from typing import Any, Literal, Optional
 from urllib.parse import urlparse
 
 import reporting
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -714,6 +714,12 @@ def list_registrations(p: Principal = Depends(principal)):
     return {"items": [r for r in STORE.registrations]}
 
 
+@app.get("/v1/admin/tenants")
+def list_tenants(p: Principal = Depends(principal)):
+    require(p, "cloudseals_admin")
+    return {"items": list(STORE.tenants.values())}
+
+
 @app.post("/v1/admin/registrations/{rid}/decision")
 def decide_registration(rid: str, body: RegistrationDecision, p: Principal = Depends(principal)):
     require(p, "cloudseals_admin")
@@ -766,15 +772,30 @@ def runtime_run(p: Principal, run_id: str) -> dict[str, Any]:
 @app.get("/v1/agentops")
 def agentops(p: Principal = Depends(principal)):
     require(p, "cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor",
-            "customer_admin", "customer_architect", "customer_risk", "auditor_readonly")
+            "customer_admin", "customer_architect", "customer_risk", "customer_controller", "customer_contributor", "auditor_readonly")
     runs = [r for r in STORE.workflow_runs.values() if p.is_staff or r["tenant_id"] == p.tenant_id]
-    return {"mode": "sandbox" if runtime_enabled() else "unavailable", "agents": trustops_runtime.AGENT_MANIFESTS,
+    model_configured = bool(os.environ.get("TRUSTOPS_AGENT_MODEL_ID", "").strip())
+    return {"mode": "sandbox" if runtime_enabled() else "unavailable",
+            "agent_mode": "bedrock_configured" if model_configured else "deterministic",
+            "model_id": os.environ.get("TRUSTOPS_AGENT_MODEL_ID") if model_configured else None,
+            "agents": trustops_runtime.AGENT_MANIFESTS,
             "workflow_pack": trustops_runtime.PACK_ID, "workflow_version": trustops_runtime.PACK_VERSION,
             "global_prohibitions": trustops_runtime.PACK["global_prohibitions"],
             "connector": trustops_runtime.PACK["connector"],
+            "connector_status": "mock_only",
             "runs": len(runs), "completed": sum(r["status"] == "completed" for r in runs),
             "approval_required": sum(r["status"] == "approval_required" for r in runs),
             "escalated": sum(r["status"] == "escalated" for r in runs)}
+
+
+@app.get("/v1/runs")
+def list_workflow_runs(limit: int = Query(default=25, ge=1, le=100), p: Principal = Depends(principal)):
+    require(p, "cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor",
+            "customer_admin", "customer_architect", "customer_risk", "customer_controller", "customer_contributor", "auditor_readonly")
+    runs = [r for r in STORE.workflow_runs.values() if p.is_staff or r["tenant_id"] == p.tenant_id]
+    runs.sort(key=lambda r: (r.get("created_at", 0), r.get("run_id", "")), reverse=True)
+    return {"items": [{k: r.get(k) for k in ("run_id", "workflow_id", "workflow_version", "receipt_id", "amount_minor",
+             "currency", "status", "policy_decision", "created_at")} for r in runs[:limit]], "total": len(runs)}
 
 
 @app.post("/v1/workflows/{pack_id}/runs", status_code=201)
@@ -792,9 +813,12 @@ def start_workflow(pack_id: str, body: WorkflowRunRequest, p: Principal = Depend
             if any(x["tenant_id"] == p.tenant_id and x["receipt_id"] == receipt_id
                    for x in STORE.workflow_runs.values()):
                 raise err(409, "duplicate_receipt", "Receipt has already been submitted for this tenant")
-            run = trustops_runtime.run_agents(p.tenant_id or "", p.sub, body.receipt, body.invoices, body.remittance)
+            model_client = trustops_runtime.configured_model_client()
+            run = trustops_runtime.run_agents(p.tenant_id or "", p.sub, body.receipt, body.invoices, body.remittance,
+                                              client=model_client)
         except trustops_runtime.RuntimeErrorCode as e:
-            raise err(422, e.code, str(e)) from e
+            status = 503 if e.code == "agent_model_unavailable" else 502 if e.code == "agent_model_output_invalid" else 422
+            raise err(status, e.code, str(e)) from e
         run_id = str(uuid.uuid4())
         run["run_id"] = run_id
         run["approval_id"] = run_id if run["policy_decision"]["approval_required"] else None

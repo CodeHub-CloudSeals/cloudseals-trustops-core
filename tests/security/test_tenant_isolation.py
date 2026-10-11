@@ -80,3 +80,11 @@ def test_idempotency_key_required(env):
     c, h = env
     assert c.post("/v1/assessments", headers=h("admin@t-bank"),
                   json={"ai_system_name": "a", "industry": "banking", "questionnaire_version": "1.0.0"}).status_code == 400
+
+
+def test_tenant_settings_listing_is_cloudseals_admin_only(env):
+    c, h = env
+    response = c.get("/v1/admin/tenants", headers=h("architect@cloudseals"))
+    assert response.status_code == 200
+    assert {tenant["tenant_id"] for tenant in response.json()["items"]} >= {"t-bank", "t-health", "t-logistics"}
+    assert c.get("/v1/admin/tenants", headers=h("admin@t-bank")).status_code == 403

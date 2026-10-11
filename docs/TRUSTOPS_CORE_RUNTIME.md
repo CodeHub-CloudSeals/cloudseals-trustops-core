@@ -2,7 +2,11 @@
 
 ## Implemented in this workspace
 
-The LedgerSight AR/Cash workflow now has six bounded agents from the TrustOps design: Intake, Match, Reconciliation, Cash Allocation, Exception, and Audit. They run as deterministic reference agents over allowlisted receipt, invoice, and remittance fields. They do not call an LLM, call external tools, hold credentials, or connect to ERP. The responses are recorded as an agent trace with the input digest.
+The LedgerSight AR/Cash workflow defines six bounded roles: Intake, Match, Reconciliation, Cash Allocation, Exception, and Audit. When `TRUSTOPS_AGENT_MODEL_ID` is set, each role makes one structured Amazon Bedrock Converse call, with temperature zero and bounded output tokens. The model receives normalized receipt, invoice, remittance, and policy fields only; it has no tools, credentials, or connector access. Invalid model responses fail the request closed. Without a configured model, the same route falls back to deterministic-only analysis and exposes that mode in `/v1/agentops` and the portal.
+
+Deterministic policy remains authoritative. The model cannot turn an unmatched or ambiguous record into an executable proposal, approve a proposal, or call a connector. Disagreement on a deterministic exact match escalates and removes the proposal. The model can recommend a tighter review route. Each returned role recommendation and model ID is attached to the run trace. The current implementation is synchronous and has not yet been exercised against a real Bedrock account/model.
+
+The local portal exposes these definitions and the workflow trace at **TrustOps** (`#/trustops`). Authorized tenant users can inspect all six role cards, submit a workflow payload, review tenant-scoped recent runs, view the per-agent trace and policy result, perform the sandbox approval/prepare/mock-execute path where their role permits it, and verify evidence. The page labels the runtime as **SANDBOX ONLY** and identifies `mock_sap`; it does not represent a live production service. `GET /v1/runs` returns a bounded tenant-scoped history (default 25, maximum 100) for that page. Terraform now maps `bedrock_model_id` into `TRUSTOPS_AGENT_MODEL_ID`; its task role already scopes Bedrock Converse/InvokeModel to the configured model ARN.
 
 The workflow currently supports a strict exact-match path. A unique reference + amount + currency match can be prepared. Multiple candidates or no exact candidate escalate. A match at or above the example pack threshold (100,000 minor units) requires a different tenant member with the dedicated `customer_controller` role to approve it. Risk users and the workflow initiator cannot approve it. The threshold is illustrative and must be replaced by customer-approved pack configuration before UAT.
 
@@ -18,7 +22,7 @@ All routes are tenant-scoped and role-gated. The runtime is available only with 
 
 ## Not production-ready yet
 
-This implementation provides an executable sandbox path, not a production TrustOps Core deployment. It must not be described as connected to SAP or as using production agents. The original Core design says Core is an existing system; its source repository and deployed service are not included in this TAAD handoff. The current code is therefore a reference runtime integrated into the TAAD API for local/dev testing.
+This implementation provides a model-backed sandbox path when configured, not a production TrustOps Core deployment. It is not connected to SAP and the hosted Bedrock calls have not been tested. The original Core design says Core is an existing system; its source repository and deployed service are not included in this TAAD handoff. The current code is therefore a reference runtime integrated into the TAAD API for local/dev testing.
 
 Before production use, engineering must:
 

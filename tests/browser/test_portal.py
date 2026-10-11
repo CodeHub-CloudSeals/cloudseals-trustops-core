@@ -7,6 +7,44 @@ from tests.browser.conftest import login
 REQUIRED_DEFAULTS = None
 
 
+def test_local_portal_opens_directly_without_seeded_user_picker(page, base_url):
+    page.goto(base_url + "/portal/")
+    page.evaluate("sessionStorage.clear()")
+    page.reload()
+    expect(page.get_by_role("heading", name="Command Center")).to_be_visible()
+    assert page.get_by_role("button", name=re.compile(r"@t-bank|@t-health|@t-logistics|@cloudseals")).count() == 0
+    expect(page.get_by_text("Local workspace")).to_be_visible()
+
+
+def test_public_customer_registration_form_is_available(page, base_url):
+    page.goto(base_url + "/portal/")
+    page.evaluate("sessionStorage.clear()")
+    page.goto(base_url + "/portal/#/register")
+    expect(page.get_by_role("heading", name="Request workspace access")).to_be_visible()
+    expect(page.get_by_label("Organisation name")).to_be_visible()
+    expect(page.get_by_label("Work email")).to_be_visible()
+    expect(page.get_by_label("Engagement reference")).to_be_visible()
+
+
+def test_customer_workspace_handoff_modules(page, base_url):
+    login(page, base_url, "admin@t-bank")
+    for route, heading in (("dashboard", "Command Center"), ("reconciliation", "Reconciliation"),
+                           ("exceptions", "Exceptions"), ("approvals", "Approvals"),
+                           ("evidence", "Evidence"), ("readiness", "Readiness"), ("shadow-roi", "Shadow ROI")):
+        page.goto(base_url + f"/portal/#/{route}")
+        expect(page.get_by_role("heading", name=heading, exact=True)).to_be_visible()
+
+
+def test_admin_registry_modules_are_discoverable(page, base_url):
+    login(page, base_url, "reviewer@cloudseals")
+    page.get_by_text("Administration", exact=True).click()
+    for route, heading in (("integrations", "Integrations"), ("datasets", "Datasets"), ("workflows", "Workflows"),
+                           ("agents", "Agents"), ("models", "Models"), ("policies", "Policies"),
+                           ("authority", "Authority"), ("approval-matrix", "Approval matrix"), ("agentops", "AgentOps")):
+        page.goto(base_url + f"/portal/#/{route}")
+        expect(page.get_by_role("heading", name=heading, exact=True)).to_be_visible()
+
+
 def fill_required_via_api(api, aid, overrides):
     """Answer every required org question quickly through the API (the UI path is covered separately)."""
     from app.main import REG
@@ -47,6 +85,29 @@ def test_login_create_answer_and_resume(page, base_url):
     page.wait_for_selector("h2")
     expect(page.locator("div.card select").first).to_have_value(value)   # resumed from server
     expect(page.get_by_text("Required answers: 1 of")).to_be_visible()
+
+
+def test_trustops_six_agent_page_runs_and_displays_trace(page, base_url):
+    login(page, base_url, "admin@t-bank")
+    page.get_by_role("link", name="TrustOps").click()
+    expect(page.get_by_role("heading", name="LedgerSight AR / Cash")).to_be_visible()
+    expect(page.get_by_text(re.compile("Deterministic reference agents are active"))).to_be_visible()
+    for agent in ("intake", "match", "reconciliation", "cash allocation", "exception", "audit"):
+        expect(page.get_by_role("heading", name=agent)).to_be_visible()
+    expect(page.get_by_text("LOCAL POLICY FLOW")).to_be_visible()
+    expect(page.locator(".flow-step")).to_have_count(6)
+    expect(page.get_by_label("Receipt ID")).to_be_visible()
+    expect(page.get_by_label("Received amount")).to_have_value("250.00")
+    expect(page.locator(".invoice-candidate")).to_have_count(1)
+    page.get_by_role("button", name="Add invoice candidate").click()
+    expect(page.locator(".invoice-candidate")).to_have_count(2)
+    page.get_by_role("button", name="Remove candidate 2").click()
+    expect(page.locator(".invoice-candidate")).to_have_count(1)
+    page.get_by_role("button", name="Run workflow").click()
+    expect(page.get_by_role("heading", name="Six agents, one governed workflow")).to_be_visible()
+    for agent in ("ledgersight.intake", "ledgersight.match", "ledgersight.reconciliation", "ledgersight.cash_allocation", "ledgersight.exception", "ledgersight.audit"):
+        expect(page.get_by_role("rowheader", name=agent)).to_be_visible()
+    expect(page.get_by_text("EXACT_MATCH_WITHIN_LIMIT")).to_be_visible()
 
 
 def test_stored_xss_is_rendered_as_text(page, base_url, api):

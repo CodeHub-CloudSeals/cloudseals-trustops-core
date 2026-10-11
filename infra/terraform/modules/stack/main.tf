@@ -2,6 +2,8 @@ locals {
   name = "taad-${var.env}"
 }
 
+data "aws_region" "current" {}
+
 module "kms" {
   source = "../kms"
   name   = local.name
@@ -68,6 +70,7 @@ module "ecs" {
   desired_count = 1
   environment = {
     TAAD_ENV                  = var.env
+    AWS_REGION                = data.aws_region.current.name
     TAAD_AUTH_MODE            = "oidc"
     TAAD_OIDC_ISSUER          = module.cognito.issuer
     TAAD_OIDC_AUDIENCE        = module.cognito.client_id
@@ -88,6 +91,7 @@ module "ecs" {
     TAAD_KMS_KEY_ARN          = module.kms.key_arn
     TAAD_SWASKA_MODEL         = var.bedrock_model_id == "" ? "none" : "bedrock"
     TAAD_BEDROCK_MODEL_ID     = var.bedrock_model_id
+    TRUSTOPS_AGENT_MODEL_ID   = var.bedrock_model_id
   }
 }
 

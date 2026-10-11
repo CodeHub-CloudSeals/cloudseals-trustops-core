@@ -61,8 +61,12 @@ def api(base_url, tokens):
 
 
 def login(page, base_url, sub):
+    import json
+    users = json.load(urllib.request.urlopen(base_url + "/v1/dev/users"))["items"]
+    token = next((u["token"] for u in users if u["sub"] == sub), None)
+    assert token, f"Unknown local test identity: {sub}"
     page.goto(base_url + "/portal/")
     page.evaluate("sessionStorage.clear()")
+    page.evaluate("token => sessionStorage.setItem('taad_token', token)", token)
     page.goto(base_url + "/portal/")
-    page.get_by_role("button", name=f"{sub} (").click()
     page.wait_for_selector("nav[aria-label=Primary]")
