@@ -20,7 +20,7 @@ def test_cases_create_status_link_and_activity(as_user, assessment):
     page.get_by_label("New status").select_option("delivered")
     page.get_by_label("Reason for status change").fill("Report sent")
     page.get_by_role("button", name="Update status").click()
-    expect(page.locator("#toast")).to_contain_text("FINAL diagnostic report")
+    expect(page.locator("#toast")).to_contain_text("Publish a diagnostic report to the customer")
     page.get_by_label("New status").select_option("intake")
     page.get_by_role("button", name="Update status").click()
     expect(page.locator(".case-history li").first).to_contain_text("Report sent")
