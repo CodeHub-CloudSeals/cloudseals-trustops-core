@@ -340,3 +340,21 @@ a.pack-card:hover{border-color:#7ebed7;box-shadow:0 6px 18px rgba(23,36,61,.06)}
 /* Shared brand accents for native controls and selected navigation. */
 progress,input[type=checkbox],input[type=radio]{accent-color:var(--brand-blue)}
 .module-menu-link[aria-current="page"],.sections button[aria-current=true],.assessment-page .sections button[aria-current=true]{color:var(--brand-blue);background:var(--brand-tint)}
+
+/* A short, guided customer assessment journey. */
+.assessment-page{max-width:1120px;margin:0 auto}
+.assessment-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:0 0 24px}
+.assessment-step{display:flex;align-items:center;gap:12px;padding:16px;text-align:left;background:#fff;color:var(--fg);border:1px solid var(--bd);border-radius:12px}
+.assessment-step:hover:not(:disabled){background:var(--brand-tint);color:var(--brand-blue)}
+.assessment-step.is-next{border-color:var(--brand-blue);background:var(--brand-tint)}
+.assessment-step strong,.assessment-step small{display:block}.assessment-step small{font-size:.75rem;font-weight:400;color:var(--mut);margin-top:4px}
+.step-number{display:grid;place-items:center;flex:none;width:30px;height:30px;border-radius:50%;background:#edf3fa;color:var(--brand-blue);font-weight:700}
+.assessment-step.is-next .step-number{background:var(--brand-blue);color:#fff}
+.assessment-page section[id]{scroll-margin-top:24px}.assessment-page .card{padding:24px}
+.assessment-detail-list{display:flex;flex-wrap:wrap;gap:20px 50px;margin:18px 0}.assessment-detail-list dt{font-size:.8rem;color:var(--mut)}.assessment-detail-list dd{margin:5px 0;font-weight:600}
+.document-examples{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:20px 0;padding:18px;background:#f5f8fc;border-radius:12px}.document-examples p{margin:6px 0 0}.document-examples strong{font-size:.9rem}
+.assessment-documents input[type=file]{max-width:500px}.assessment-question-step{margin-top:28px}
+.assessment-page .layout.single-section{grid-template-columns:1fr}.assessment-page .single-section .sections{display:none}
+.question-evidence-help{font-size:.8rem;color:var(--mut)}.question-evidence-help summary{cursor:pointer}.question-evidence-help p{max-width:480px}
+@media(max-width:760px){.assessment-steps{grid-template-columns:repeat(2,minmax(0,1fr))}.assessment-step{padding:12px;gap:8px}.assessment-step small{display:none}.document-examples{grid-template-columns:1fr;gap:12px}.assessment-page .card{padding:18px}.assessment-detail-list{gap:16px}}
+.assessment-guide{margin-bottom:24px}.sample-drawer{border-top:1px solid var(--bd);padding-top:14px}.sample-drawer summary{cursor:pointer;font-weight:650;color:var(--brand-blue)}.sample-drawer>.row{margin:14px 0}.sample-drawer>.row a{font-size:.85rem}.assessment-model-notice{padding:16px 20px;border:1px solid #e8cf9f;border-radius:12px;background:#fbf4e4;color:#765300;font-size:.9rem;margin-bottom:20px}

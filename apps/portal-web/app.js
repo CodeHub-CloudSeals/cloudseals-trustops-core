@@ -1,4 +1,5 @@
 // TAAD portal: dependency-free ES module. All dynamic text goes through textContent (no innerHTML).
+import { createAgentOffice } from "./agent-office.js";
 const $ = (s, r = document) => r.querySelector(s);
 const main = $("#main"), nav = $("#nav"), who = $("#who"), contextBar = $("#contextBar");
 const state = { token: sessionStorage.getItem("taad_token"), me: null, cfg: { mode: "oidc", oidc: {} } };
@@ -215,6 +216,41 @@ const dl = async (url, name) => {
 };
 
 // ---------- assessments ----------
+const SAMPLE_AI_REGISTER = "SYNTHETIC SAMPLE ONLY — Example Bank, not a real customer.\nAI Register. Our credit scoring model assigns loan applicants a score and decides approvals automatically. The chatbot answers customer questions about accounts.\nCredit scoring owner: Lending team. Inputs: application details and repayment history. Human review: appeals only.\nChatbot owner: Customer support. Inputs: approved account FAQs. It gives information and cannot change accounts.\nUnknown: model test results, retention periods and approval records have not been supplied.\n";
+const SAMPLE_AI_POLICY = "SYNTHETIC SAMPLE ONLY — Example Bank.\nAI policy example: customer support staff review chatbot complaints. Loan applicants may request a human review. Access is limited to authorised teams.\nMissing evidence: no signed model validation report, retention schedule or approval log is supplied in this sample. Missing evidence does not prove a control is absent.\n";
+function sampleDownload(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+  const link = el("a", { href: url, download: name }); link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function assessmentGuide(canCreate = false) {
+  return el("section", { class: "card assessment-guide" }, el("span", { class: "eyebrow" }, "WHY CLOUDSEALS"),
+    el("h3", {}, "Understand your AI. Find the gaps. Know what to improve."),
+    el("p", {}, "We help you understand how your organisation uses AI, which controls are evidenced, and what needs further review. You receive a reviewed assessment report and an improvement roadmap."),
+    el("div", { class: "document-examples" },
+      el("div", {}, el("strong", {}, "You share"), el("p", { class: "help" }, "Your AI list, system overview, policies and test or audit records. Start with what you have.")),
+      el("div", {}, el("strong", {}, "We assess & review"), el("p", { class: "help" }, "Identify documented AI uses, check evidence and review potential gaps with a CloudSeals reviewer.")),
+      el("div", {}, el("strong", {}, "You receive"), el("p", { class: "help" }, "Reviewed findings, maturity results and prioritised next actions. Final reports appear after approval."))),
+    el("details", { class: "sample-drawer" }, el("summary", {}, "See sample documents and a sample report"),
+      el("p", { class: "help" }, "SYNTHETIC DEMO: these examples explain the process. They are not customer results or a compliance certificate."),
+      el("div", { class: "row" },
+        el("button", { class: "secondary", type: "button", onclick: () => sampleDownload("SAMPLE-ai-register.txt", SAMPLE_AI_REGISTER) }, "Download sample AI register"),
+        el("button", { class: "secondary", type: "button", onclick: () => sampleDownload("SAMPLE-ai-policy.txt", SAMPLE_AI_POLICY) }, "Download sample policy"),
+        el("a", { class: "btn secondary", href: "sample-assessment-report.html", target: "_blank", rel: "noopener" }, "View sample report")),
+      canCreate ? el("button", { type: "button", onclick: safe(async (e) => {
+        const button = e.currentTarget; button.disabled = true; button.textContent = "Preparing sample assessment…";
+        try {
+          const a = await api("/v1/assessments", { method: "POST", idem: true, body: { ai_system_name: "SYNTHETIC SAMPLE — Example Bank", industry: "banking", questionnaire_version: "1.0.0" } });
+          for (const [filename, text] of [["SAMPLE-ai-register.txt", SAMPLE_AI_REGISTER], ["SAMPLE-ai-policy.txt", SAMPLE_AI_POLICY]]) {
+            const buf = new TextEncoder().encode(text).buffer;
+            const g = await api(`/v1/assessments/${a.assessment_id}/evidence/upload-url`, { method: "POST", body: { filename, content_type: "text/plain", file_size_bytes: buf.byteLength, claimed_sha256: await sha256Hex(buf) } });
+            const uploaded = await api(g.upload_url, { method: "PUT", body: buf, headers: { "Content-Type": "application/octet-stream" } });
+            if (uploaded.state !== "clean") throw new Error("Sample upload did not pass the safety check. Open the sample assessment to retry.");
+          }
+          toast("Separate sample assessment created. Your customer assessments were not changed."); go(`#/assessment/${a.assessment_id}`);
+        } finally { button.disabled = false; button.textContent = "Try sample data in a separate assessment"; }
+      }) }, "Try sample data in a separate assessment") : ""));
+}
+
 routes.assessments = async () => {
   const { items } = await api("/v1/assessments");
   const canCreate = !state.me.is_staff && state.me.roles.some((r) => ["customer_admin", "customer_architect"].includes(r));
@@ -228,6 +264,7 @@ routes.assessments = async () => {
   el("label", { for: "ind" }, "Industry"), el("select", { id: "ind", name: "industry" }, ["banking", "investment", "insurance", "healthcare", "logistics", "industrial", "government", "other"].map((i) => el("option", { value: i }, i))),
   el("p", {}, el("button", {}, "Create assessment")));
   main.replaceChildren(moduleFrame("TAAD · CUSTOMER WORKSPACE", "AI architecture diagnosis", "Assess your AI system against the versioned question catalogue, attach evidence, and track reviewed outcomes.",
+    assessmentGuide(canCreate),
     el("section", { class: "module-metrics compact" }, [["Assessments", items.length], ["In progress", items.filter((a) => a.status === "In progress").length], ["Submitted", items.filter((a) => a.status !== "In progress").length]].map(([label, value]) => el("article", {}, el("span", {}, label), el("strong", {}, String(value))))),
     canCreate ? form : "",
     el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "YOUR WORKSPACE"), el("h3", {}, "Assessments"))),
@@ -248,23 +285,36 @@ routes.assessment = async (aid) => {
     const sections = [...new Set(qs.map((q) => q.section))];
     if (!sections.includes(ctx.section)) ctx.section = sections[0];
     const p = ctx.a.progress, frozen = ctx.a.status !== "In progress";
+    const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    const nextStep = frozen ? "assessment-review" : ctx.evidence.length ? "assessment-questions" : "assessment-documents";
     wrap.replaceChildren(
-      el("div", { class: "module-page-heading" }, el("span", { class: "eyebrow" }, "TAAD · ASSESSMENT WORKSPACE"), el("h2", {}, ctx.a.ai_system_name),
-        el("p", {}, "Work through the assigned sections, save evidence-backed answers, and submit when required questions are complete."), el("span", { class: `tag ${frozen ? "ok" : "medium"}` }, ctx.a.status)),
-      el("div", { class: "module-panel assessment-progress" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "QUESTIONNAIRE PROGRESS"), el("h3", {}, `${p.required_answered} of ${p.required_total} required answers`)), el("strong", {}, `${p.required_total ? Math.round(p.required_answered / p.required_total * 100) : 0}%`)), el("progress", { id: "pg", max: p.required_total || 1, value: p.required_answered })),
+      el("div", { class: "module-page-heading" }, el("span", { class: "eyebrow" }, "YOUR AI ASSESSMENT"), el("h2", {}, ctx.a.ai_system_name),
+        el("p", {}, "Share your documents, answer a few questions, then send your assessment for review."), el("span", { class: `tag ${frozen ? "ok" : "medium"}` }, ctx.a.status)),
+      assessmentGuide(!state.me.is_staff && state.me.roles.some((r) => ["customer_admin", "customer_architect"].includes(r))),
+      state.cfg.assessment_model === "demo" ? el("p", { class: "assessment-model-notice", role: "status" }, "DEMO ENVIRONMENT: AI analysis here uses scripted examples. Real customer documents need a connected AI service and reviewer approval. Sample reports are illustrations only.")
+        : state.cfg.assessment_model === "unavailable" ? el("p", { class: "assessment-model-notice", role: "status" }, "Document AI analysis is not connected yet. You can upload documents and complete the questionnaire for review; automatic document findings and the diagnostic roadmap require the AI service.") : "",
+      el("nav", { class: "assessment-steps", "aria-label": "Assessment steps" },
+        [["assessment-details", "1", "Details", "Your AI system"], ["assessment-documents", "2", "Documents", "Share what you have"], ["assessment-questions", "3", "Questions", "Tell us about your AI"], ["assessment-review", "4", "Review & report", "Send for review"]].map(([id, number, title, hint]) =>
+          el("button", { class: `assessment-step ${nextStep === id ? "is-next" : ""}`, type: "button", onclick: () => jump(id) }, el("span", { class: "step-number" }, number), el("span", {}, el("strong", {}, title), el("small", {}, hint))))),
+      el("section", { id: "assessment-details", class: "card assessment-details" }, el("span", { class: "eyebrow" }, "STEP 1 · DETAILS"), el("h3", {}, "Your assessment at a glance"),
+        el("dl", { class: "assessment-detail-list" }, [["AI system", ctx.a.ai_system_name], ["Industry", ctx.a.industry], ["Status", ctx.a.status]].map(([label, value]) => el("div", {}, el("dt", {}, label), el("dd", {}, value || "Not specified")))),
+        el("button", { class: "secondary", type: "button", onclick: () => jump("assessment-documents") }, "Continue to documents")),
+      evidencePanel(ctx, draw),
+      el("section", { id: "assessment-questions", class: "assessment-question-step" },
+      el("div", { class: "module-panel assessment-progress" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 3 · QUESTIONS"), el("h3", {}, `${p.required_answered} of ${p.required_total} required answers`)), el("strong", {}, `${p.required_total ? Math.round(p.required_answered / p.required_total * 100) : 0}%`)), el("progress", { id: "pg", max: p.required_total || 1, value: p.required_answered }), el("p", { class: "help" }, "Answers save automatically when you finish a field. Choose ‘I don't know’ when you are unsure.")),
       el("details", { class: "setup-panel" }, el("summary", {}, el("strong", {}, "Scope & team"), el("span", { class: "help" }, ctx.scopeType === "org" ? " Whole organisation · optional settings" : ` ${ctx.scopeType}: ${ctx.scopeId}`)),
         scopeBar(ctx, draw),
         state.me.roles.some((role) => ["customer_admin", "customer_architect"].includes(role)) ? assignmentPanel(ctx, sections, draw) : ""),
-      el("div", { class: "layout" },
+      el("div", { class: `layout ${sections.length === 1 ? "single-section" : ""}` },
         el("nav", { class: "sections", "aria-label": "Questionnaire sections" }, el("span", { class: "eyebrow" }, "SECTIONS"), sections.map((sec) => {
           const inSec = qs.filter((q) => q.section === sec), done = inSec.filter((q) => ctx.answers[`${ctx.scopeId}|${q.question_id}`]).length;
           return el("button", { "aria-current": sec === ctx.section, onclick: () => { ctx.section = sec; draw(); window.scrollTo({ top: 0 }); } },
             el("span", {}, sec), el("small", { class: done === inSec.length ? "done" : "" }, done === inSec.length ? "✓" : `${done}/${inSec.length}`));
         })),
-        el("div", { class: "questions" }, el("h3", { class: "section-title" }, ctx.section), qs.filter((q) => q.section === ctx.section).map((q, i) => questionCard(ctx, q, frozen, draw, i + 1)))),
-      evidencePanel(ctx, draw),
+        el("div", { class: "questions" }, el("h3", { class: "section-title" }, ctx.section), qs.filter((q) => q.section === ctx.section).map((q, i) => questionCard(ctx, q, frozen, draw, i + 1))))),
+      el("section", { id: "assessment-review" },
       !frozen && !state.me.is_staff ? submitPanel(ctx, draw) : "",
-      await reportsPanel(ctx, draw));
+      await reportsPanel(ctx, draw)));
   };
   await draw();
 };
@@ -347,13 +397,13 @@ function questionCard(ctx, q, frozen, draw, num = 0) {
   return el("article", { class: `q-card ${answered ? "is-answered" : ""}` },
     el("div", { class: "q-head" }, el("span", { class: "q-num" }, String(num)),
       el("div", {}, el("label", { for: id, class: "q-title" }, q.question),
-        el("div", { class: "q-meta" }, el("span", { class: `tag ${q.required === "yes" ? "req" : ""}` }, q.required === "yes" ? "Required" : "If applicable"), el("span", { class: "q-id" }, q.question_id)),
+        el("div", { class: "q-meta" }, el("span", { class: `tag ${q.required === "yes" ? "req" : ""}` }, q.required === "yes" ? "Required" : "If applicable"), state.me.is_staff ? el("span", { class: "q-id" }, q.question_id) : ""),
         q.guidance ? el("p", { class: "q-guidance" }, q.guidance) : "")),
     el("div", { class: "q-input" }, input),
     ctx.evidence.some((e) => e.state === "clean") ? el("div", { class: "q-evidence" }, el("span", { class: "help" }, "Attach evidence (optional)"), ev) : "",
     el("div", { class: "q-foot" },
       el("label", { class: "unknown-toggle", for: `${id}-u` }, unknown, el("span", {}, "I don't know")),
-      q.evidence_request ? el("span", { class: "help" }, `Helpful evidence: ${q.evidence_request}`) : "",
+      q.evidence_request ? el("details", { class: "question-evidence-help" }, el("summary", {}, "What document could help?"), el("p", { class: "help" }, q.evidence_request)) : "",
       el("span", { class: `q-status ${answered ? "ok" : ""}`, id: `${id}-s` }, status)),
     swaskaDrawer);
 }
@@ -368,8 +418,10 @@ function evidencePanel(ctx, draw) {
         : el("p", { class: "help" }, "No candidate answers found in this file.");
     }) : ""));
   const f = el("input", { type: "file", id: "ef", accept: ".pdf,.txt,.csv,.json,.docx,.xlsx" });
-  return el("section", { class: "card" }, el("h3", {}, "Evidence (quarantined and scanned before use)"), list.length ? el("ul", {}, list) : el("p", { class: "help" }, "No files uploaded."), extractOut,
-    el("p", { class: "help" }, "Documents (PDF, Word, text) can also be read for the AI use cases they describe: ", el("a", { href: `#/use-cases/${ctx.aid}` }, "open AI use cases →")),
+  return el("section", { class: "card assessment-documents", id: "assessment-documents" }, el("span", { class: "eyebrow" }, "STEP 2 · DOCUMENTS"), el("h3", {}, "Upload documents about your AI"),
+    el("p", {}, "Start with any documents you already have. You can answer the questions even if you have no documents yet."),
+    el("div", { class: "document-examples" }, [ ["AI register", "A list of your AI tools, their purpose and owners."], ["System overview", "How your AI works and which data or systems it uses."], ["Policies & test reports", "Your AI rules, approvals, risks or testing results."] ].map(([title, description]) => el("div", {}, el("strong", {}, title), el("p", { class: "help" }, description)))),
+    list.length ? el("ul", {}, list) : el("p", { class: "help" }, "No files uploaded yet."), extractOut,
     el("label", { for: "ef" }, "Upload a document"), f,
     el("p", {}, el("button", { onclick: safe(async () => {
       const file = f.files[0]; if (!file) return toast("Choose a file first", true);
@@ -377,19 +429,28 @@ function evidencePanel(ctx, draw) {
       const g = await api(`/v1/assessments/${ctx.aid}/evidence/upload-url`, { method: "POST", body: { filename: file.name, content_type: file.type || "application/octet-stream", file_size_bytes: file.size, claimed_sha256: await sha256Hex(buf) } });
       const r = await api(g.upload_url, { method: "PUT", body: buf, headers: { "Content-Type": "application/octet-stream" } });
       toast(r.state === "clean" ? "Uploaded and scanned: clean" : `Upload ${r.state}: ${r.reason}`, r.state !== "clean"); draw();
-    }) }, "Upload")));
+    }) }, "Upload")),
+    el("p", { class: "help" }, "PDF, Word, Excel, TXT, CSV or JSON. Files are checked for safety before use."),
+    el("div", { class: "row" }, el("button", { class: "secondary", type: "button", onclick: () => document.getElementById("assessment-questions")?.scrollIntoView({ behavior: "smooth", block: "start" }) }, "Continue to questions"),
+      list.length ? el("a", { href: `#/use-cases/${ctx.aid}` }, "View AI use cases from documents →") : ""));
 }
 
 function submitPanel(ctx, draw) {
   const p = ctx.a.progress, ready = p.required_answered >= p.required_total;
-  return el("section", { class: "card" }, el("h3", {}, "Submit for diagnosis"), el("p", { class: "help" }, "Submitting freezes your answers. This cannot be undone."),
+  return el("section", { class: "card" }, el("span", { class: "eyebrow" }, "STEP 4 · REVIEW & REPORT"), el("h3", {}, "Send your assessment for review"), el("p", { class: "help" }, "CloudSeals reviews your assessment before publishing your report. Submitting freezes your answers. This cannot be undone."),
     el("button", { disabled: !ready, onclick: safe(async () => { if (!confirm("Submit and freeze all answers?")) return; await api(`/v1/assessments/${ctx.aid}/submit`, { method: "POST", idem: true }); toast("Submitted"); draw(); }) }, ready ? "Submit" : `Answer ${p.required_total - p.required_answered} more required question(s)`));
 }
 
 async function reportsPanel(ctx, draw) {
   const { items } = await api(`/v1/assessments/${ctx.aid}/reports`);
   const staff = state.me.is_staff;
-  const kids = [el("h3", {}, "Reports")];
+  const kids = [el("h3", {}, "Your reports"), el("p", { class: "help" }, "Your final report is based on your assessment and is released after CloudSeals review."),
+    el("a", { href: "sample-assessment-report.html", target: "_blank", rel: "noopener" }, "Preview a sample report (synthetic example)")];
+  if (!staff) {
+    const inventory = await api(`/v1/assessments/${ctx.aid}/inventory`);
+    if (inventory.delivery) kids.push(deliveredDiagnosticPanel(ctx.aid, inventory.delivery));
+    else kids.push(el("p", { class: "help" }, "Document-based report and improvement roadmap: awaiting analysis, review and publication."));
+  }
   if (!items.length) kids.push(el("p", { class: "help" }, staff || ctx.a.status === "In progress" ? "No reports yet." : "Your report is under CloudSeals review. It is published after approval."));
   for (const r of items) {
     const row = el("div", { class: "row" }, el("span", { class: `tag ${r.status === "published" ? "ok" : ""}` }, r.status), `v${r.version}`,
@@ -1200,8 +1261,15 @@ routes["agent-flow"] = async () => {
   const note = el("p", { class: "module-note" });
   const stage = el("div", { class: "af-stage", "aria-hidden": "true" }), bubble = el("div", { class: "af-bubble", "aria-live": "polite" });
   const list = el("ol", { class: "af-list" }), banner = el("div", { class: "af-banner" }), controls = el("div", { class: "af-controls" });
+  const office = createAgentOffice(el);
+  const officeToggle = el("button", { type: "button", class: "secondary", "aria-expanded": "true", onclick: (e) => {
+    office.element.hidden = !office.element.hidden;
+    e.currentTarget.setAttribute("aria-expanded", String(!office.element.hidden));
+    e.currentTarget.textContent = office.element.hidden ? "Show office view" : "Hide office view";
+  } }, "Hide office view");
   const initials = (n) => n.name.split(" ").map((w) => w[0]).join("").slice(0, 2);
   const draw = () => {
+    office.update({ nodes, flow, current, running });
     const done = nodes.filter((n) => ["done", "skipped", "failed"].includes(n.state)).length;
     note.textContent = flow === "payment"
       ? "Sandbox only: nothing is written to a real ERP. The workflow runs once on the server; each agent's real output is then shown in turn, and the activity text describes what that agent does."
@@ -1346,8 +1414,11 @@ routes["agent-flow"] = async () => {
     controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (9 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn));
   }
   drawControls(); draw();
-  main.replaceChildren(moduleFrame("AGENTS · LIVE VIEW", "Agent Flow", "Press Run and watch each agent pick up the work, do its part and hand the result to the next one.",
-    el("section", { class: "module-panel af-panel" }, controls, banner, el("div", { class: "af-sticky" }, stage, bubble), list,
+  main.replaceChildren(moduleFrame("AGENTS · OFFICE VIEW", "AI Agents Office", "Meet your specialist team. Select a desk to inspect its task, status and returned output. Use Run agents to start the selected workflow.",
+    state.cfg.assessment_model === "unavailable" ? el("p", { class: "assessment-model-notice" }, "Document AI is not connected in this environment. Payment sandbox rules can run; document analysis agents will show unavailable or skipped. No sample analysis is substituted for customer results.")
+      : state.cfg.assessment_model === "demo" ? el("p", { class: "assessment-model-notice" }, "SCRIPTED DEMO MODEL · Outputs in this environment are test examples, not real customer analysis.") : "",
+    el("section", { class: "module-panel af-panel" }, controls, banner, officeToggle, office.element,
+      el("details", { class: "office-trace", open: true }, el("summary", {}, "Step-by-step activity"), el("div", { class: "af-sticky" }, stage, bubble), list),
       note)));
 };
 

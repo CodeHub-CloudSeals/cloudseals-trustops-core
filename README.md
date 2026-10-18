@@ -237,3 +237,11 @@ There is deliberately **no "break-glass"** override of maker-checker: staff cann
 * [docs/SECURITY_AND_LIMITS.md](docs/SECURITY_AND_LIMITS.md): security model.
 * [PROJECT_COMPLETION_STATUS.md](PROJECT_COMPLETION_STATUS.md): what is done, what is open.
 * [ENGINEERING_README.md](ENGINEERING_README.md), [TAAD_END_GOAL.md](TAAD_END_GOAL.md): original TAAD design handoff.
+
+### AI Agents Office
+
+Open `/portal/#/agent-flow` for the office view. Select an agent desk to inspect its task, state, returned output and skipped/failed reason. The existing workflow and role checks remain authoritative; the view cannot approve findings or execute external writes. It also keeps the step-by-step trace available.
+
+Diagnosis desks follow separate API requests. The payment office replays the completed server trace, explicitly labelled **workflow playback**; it does not stream intermediate server events. The illustration animates pending/selected steps and does not reveal model reasoning. Document analysis requires a configured model; unavailable and scripted-demo environments are labelled. Reduced-motion preferences disable office animation.
+
+The customer assessment also includes sample document downloads, a separate sample-assessment action, and an explicitly synthetic report preview. Published customer diagnostics appear in the assessment report section after reviewer publication. `/portal/design-options.html` contains the four design previews.

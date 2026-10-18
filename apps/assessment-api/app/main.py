@@ -2049,8 +2049,9 @@ _portal = ROOT / "apps" / "portal-web"
 @app.get("/portal/config.json")
 def portal_config():
     """Use seeded users only for local development; deployed portals require real OIDC config."""
+    assessment_model = "demo" if getattr(SWASKA_CLIENT, "is_demo", False) else "configured" if SWASKA_CLIENT is not None else "unavailable"
     if ENV == "local" and AUTH_MODE == "dev":
-        return {"mode": "dev", "oidc": {}}
+        return {"mode": "dev", "oidc": {}, "assessment_model": assessment_model}
     if AUTH_MODE != "oidc":
         raise err(503, "portal_auth_misconfigured", "Portal requires OIDC authentication outside local development")
     google = AUTH_PROVIDER == "google"
@@ -2071,7 +2072,7 @@ def portal_config():
             raise err(503, "portal_auth_misconfigured", "Sign-in is not fully configured for this portal")
     if not oidc["client_id"]:
         raise err(503, "portal_auth_misconfigured", "Sign-in is not fully configured for this portal")
-    return {"mode": "oidc", "oidc": oidc}
+    return {"mode": "oidc", "oidc": oidc, "assessment_model": assessment_model}
 
 
 GOOGLE_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"

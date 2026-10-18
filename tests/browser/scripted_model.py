@@ -8,6 +8,7 @@ PRINCIPLES = ["model_agnostic", "neuro_symbolic", "digital_twin", "evidence_fabr
 
 class ScriptedModel:
     model_id = "scripted-browser-test"
+    is_demo = True
 
     def complete(self, system, user, max_tokens=600):
         if "Inventory Agent" in system:

@@ -10,9 +10,21 @@ from fastapi.testclient import TestClient
 def test_local_portal_explicitly_uses_seeded_development_login(monkeypatch):
     monkeypatch.setattr(main, "ENV", "local")
     monkeypatch.setattr(main, "AUTH_MODE", "dev")
-    assert main.portal_config() == {"mode": "dev", "oidc": {}}
+    monkeypatch.setattr(main, "SWASKA_CLIENT", None)
+    assert main.portal_config() == {"mode": "dev", "oidc": {}, "assessment_model": "unavailable"}
     response = TestClient(main.app).get("/portal/config.json")
     assert response.status_code == 200 and response.json()["mode"] == "dev"
+
+
+def test_portal_distinguishes_scripted_demo_from_real_model(monkeypatch):
+    monkeypatch.setattr(main, "ENV", "local")
+    monkeypatch.setattr(main, "AUTH_MODE", "dev")
+    class DemoModel:
+        is_demo = True
+    monkeypatch.setattr(main, "SWASKA_CLIENT", DemoModel())
+    assert main.portal_config()["assessment_model"] == "demo"
+    monkeypatch.setattr(main, "SWASKA_CLIENT", object())
+    assert main.portal_config()["assessment_model"] == "configured"
 
 
 def test_deployed_portal_fails_closed_without_cognito_settings(monkeypatch):
