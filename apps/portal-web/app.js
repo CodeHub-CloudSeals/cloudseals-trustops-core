@@ -1341,13 +1341,16 @@ routes["agent-flow"] = async () => {
   const scenarioExplanation = el("div", {class:"scenario-explanation"});
   const note = el("p", { class: "module-note" });
   const list = el("ol", { class: "af-list" }), banner = el("div", { class: "af-banner" }), controls = el("div", { class: "af-controls" });
+  const flowProgress = progressFill(0), flowStatus = el("span", {role:"status"}), flowResult = el("div");
+  banner.append(el("div", {class:"af-progress"}, flowProgress), flowStatus, flowResult);
   const draw = () => {
     const done = nodes.filter((n) => ["done", "skipped", "failed"].includes(n.state)).length;
     note.textContent = flow === "payment"
       ? "Each step below is driven by an execution event from the workflow service. Inspect the returned result below. External ERP posting is not enabled in this workspace."
       : "Each agent is a separate real call. Agents you cannot use, or that have nothing to work on yet, are marked Skipped with the reason. Output is advisory and never saved as an answer.";
-    banner.replaceChildren(el("div", { class: "af-progress" }, progressFill(Math.round(done / nodes.length * 100))),
-      el("span", {}, running ? `Running… ${done} of ${nodes.length} agents finished` : done ? `${done} of ${nodes.length} agents finished` : "Choose a flow and press Run"), summary || "");
+    flowProgress.style.width = `${Math.round(done / nodes.length * 100)}%`;
+    flowStatus.textContent = running ? `Running… ${done} of ${nodes.length} agents finished` : done ? `${done} of ${nodes.length} agents finished` : "Choose a flow and press Run";
+    if (flowResult.firstChild !== summary) flowResult.replaceChildren(...(summary ? [summary] : []));
     list.replaceChildren(...nodes.map((n, i) => el("li", { class: `af-node is-${n.state}` },
       el("span", { class: "af-dot", "aria-hidden": "true" }, n.state === "done" ? "✓" : n.state === "failed" ? "!" : n.state === "skipped" ? "–" : String(i + 1)),
       el("div", { class: "af-card" }, el("div", { class: "af-card-head" }, el("strong", {}, n.name), el("span", { class: `af-chip ${n.state}` }, FLOW_STATE[n.state]),
@@ -1486,6 +1489,8 @@ routes["agent-flow"] = async () => {
   }) }, "▶ Run agents");
   function drawControls() {
     runBtn.disabled = running;
+    runBtn.textContent = running ? "Running workflow…" : "▶ Run agents";
+    runBtn.setAttribute("aria-busy", String(running));
     const tab = (id, label) => el("button", { class: flow === id ? "" : "secondary", disabled: running || (id === "payment" && !runtimeUp), title: id === "payment" && !runtimeUp ? "The governed workflow runtime is not enabled in this environment" : null, onclick: () => { flow = id; reset(); drawControls(); draw(); } }, label);
     const picker = flow === "payment"
       ? el("label", {}, "Scenario", el("select", { disabled: running, onchange: (e) => { preset = e.target.value; paymentInput = paymentBody(preset); reset(); drawControls(); draw(); } }, Object.entries(PRESETS).map(([v, l]) => el("option", { value: v, selected: v === preset }, l))))
