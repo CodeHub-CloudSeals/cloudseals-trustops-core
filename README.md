@@ -245,3 +245,9 @@ Open `/portal/#/agent-flow` for the office view. Select an agent desk to inspect
 Diagnosis desks follow separate API requests. The payment office replays the completed server trace, explicitly labelled **workflow playback**; it does not stream intermediate server events. The illustration animates pending/selected steps and does not reveal model reasoning. Document analysis requires a configured model; unavailable and scripted-demo environments are labelled. Reduced-motion preferences disable office animation.
 
 The customer assessment also includes sample document downloads, a separate sample-assessment action, and an explicitly synthetic report preview. Published customer diagnostics appear in the assessment report section after reviewer publication. `/portal/design-options.html` contains the four design previews.
+
+### Client demo preparation
+
+On a seeded local server, run `../work/verify-env/bin/python scripts/prepare_client_demo.py` and open `/portal/#/demo`. Demo Studio is local-only, includes seeded presenter roles, and reads readiness, reports and workflow state from the API. The preparation script refuses non-local URLs and OIDC environments. It creates synthetic evidence, a rules-based published PDF/Word report, exact-match execution, a pending high-value approval, ambiguous/no-match escalations and an approved mock execution. It verifies evidence integrity and negative role/tenant access checks. Reruns preserve previous decisions; an already-used pending approval is replaced with a new sample run rather than reset.
+
+No model is stubbed or silently substituted. A disconnected document model is labelled unavailable. The prepared questionnaire report does not prove automatic document analysis; real document-generated diagnostics require a working model and reviewer publication. Demo ERP actions use `mock_sap`, and local evidence is a hash chain without production KMS signatures.

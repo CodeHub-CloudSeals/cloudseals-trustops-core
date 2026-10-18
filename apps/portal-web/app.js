@@ -179,6 +179,7 @@ async function render() {
     ...(hasAnyRole("cloudseals_admin") ? [["tenant-settings", "Tenant settings"]] : []),
   ];
   nav.replaceChildren(
+    ...(state.cfg.mode === "dev" ? [link(["demo", "Demo Studio"])] : []),
     link(["dashboard", "Command Center"]), link(["assessments", "Diagnosis"]), ...(canUseAdminMetrics ? [link(["cases", "Cases"])] : []), link(["use-cases", "Use cases"]), link(["trustops", "TrustOps"]), link(["agent-flow", "Agent Flow"]),
     canUseAdminMetrics ? link(["queue", "Review queue"]) : "",
     group("Operations", [["reconciliation", "Reconciliation"], ["exceptions", "Exceptions"], ["approvals", "Approvals"],
@@ -216,6 +217,54 @@ const dl = async (url, name) => {
 };
 
 // ---------- assessments ----------
+async function demoSignIn(sub, route) {
+  if (state.cfg.mode !== "dev") throw new Error("Presentation roles are available only in the local demo.");
+  const { items } = await fetch("/v1/dev/users").then(r => { if (!r.ok) throw new Error("Local demo accounts are unavailable"); return r.json(); });
+  const user = items.find(u => u.sub === sub);
+  if (!user) throw new Error("This demo role is unavailable");
+  state.token = user.token; sessionStorage.setItem("taad_token", user.token); state.me = null;
+  if (location.hash === route) await render(); else go(route);
+}
+
+routes.demo = async () => {
+  if (state.cfg.mode !== "dev") return main.replaceChildren(moduleFrame("ACCESS", "Local demonstration only", "This presentation workspace is not enabled in deployed customer environments."));
+  const [health, { items: assessments }, { items: runs }] = await Promise.all([fetch("/health").then(r => r.json()), api("/v1/assessments"), api("/v1/runs?limit=100")]);
+  const sample = assessments.find(a => a.ai_system_name === "DEMO | Example Bank — AI payment operations");
+  const demoRuns = runs.filter(r => r.receipt_id.startsWith("DEMO-"));
+  const completed = demoRuns.find(r => r.receipt_id === "DEMO-MATCH");
+  const approval = demoRuns.find(r => r.receipt_id === "DEMO-APPROVAL");
+  const sampleReports = sample ? (await api(`/v1/assessments/${sample.assessment_id}/reports`)).items.filter(r => r.status === "published") : [];
+  const report = sampleReports[0];
+  const open = (label, role, route, secondary = false) => el("button", { type: "button", class: secondary ? "secondary" : "", onclick: safe(() => demoSignIn(role, route)) }, label);
+  const reportButtons = report ? el("div", { class: "row" }, ["pdf", "docx"].map(format => el("button", { class: "secondary", type: "button", onclick: safe(() => dl(`/v1/assessments/${sample.assessment_id}/reports/${report.report_id}/download?format=${format}`, `SYNTHETIC-TrustOps-assessment.${format}`)) }, `Download ${format.toUpperCase()}`))) : el("p", { class: "help" }, "The prepared sample report is not available for this role yet.");
+  const verification = el("div", { class: "demo-verify-result", role: "status" });
+  const step = (number, title, text, status, ...actions) => el("article", { class: "demo-story-card" }, el("span", { class: "demo-step-number" }, number), el("span", { class: "eyebrow" }, status), el("h3", {}, title), el("p", {}, text), el("div", { class: "demo-card-actions" }, actions));
+  main.replaceChildren(el("div", { class: "module-page demo-studio" },
+    el("section", { class: "demo-hero" }, el("div", {}, el("span", { class: "eyebrow" }, "CLOUDSEALS TRUSTOPS · CLIENT DEMONSTRATION"), el("h2", {}, "AI you can operate with confidence."),
+      el("p", {}, "Understand the risk. Control the action. Keep the proof."),
+      el("div", { class: "row" }, open("Explore the agent office →", "admin@t-bank", "#/agent-flow"), sample ? open("Open sample assessment", "admin@t-bank", `#/assessment/${sample.assessment_id}`, true) : "")),
+      el("div", { class: "demo-hero-seal" }, el("span", { "aria-hidden": "true" }, "◇"), el("strong", {}, "Governed by design"), el("small", {}, "Policy · Human oversight · Evidence"))),
+    el("p", { class: "demo-disclosure" }, "SYNTHETIC CLIENT DEMO · Real application APIs and policy checks, fictional data, mock ERP connector. Prepared sample approvals are demonstration fixtures, not customer sign-offs."),
+    el("section", { class: "demo-readiness", "aria-label": "Live demo readiness" },
+      [["Application", health.status === "ok" ? "Online" : "Check service"], ["Question catalogue", `${health.question_count} questions · v${health.registry_version}`], ["Prepared workflows", `${demoRuns.length} scenarios`], ["Sample report", report ? "Published · PDF & Word" : "Not prepared"]].map(([label, value]) => el("div", {}, el("small", {}, label), el("strong", {}, value)))),
+    el("div", { class: "demo-section-heading" }, el("h3", {}, "Four moments that explain TrustOps"), el("span", { class: "help" }, "Suggested walkthrough · 8–10 minutes")),
+    el("div", { class: "demo-story-grid" },
+      step("01", "Understand your AI", "Assess a fictional legacy AI payment process using its inventory, policies and questionnaire answers. Review gaps and download the prepared report; the governed payment workflow shows the target controls.", report ? "PREPARED QUESTIONNAIRE REPORT" : "ASSESSMENT", sample ? open("View assessment & findings", "admin@t-bank", `#/assessment/${sample.assessment_id}`) : el("p", { class: "help" }, "Demo dataset needs preparation."), reportButtons),
+      step("02", "Meet the specialist team", "Watch the agent office and inspect each desk's task and returned output. Payment results replay the completed server trace.", "INTERACTIVE AGENT OFFICE", open("Run the agent office", "admin@t-bank", "#/agent-flow")),
+      step("03", "Keep people in control", "An exact match can proceed within policy. High-value actions need a controller; ambiguous matches are escalated.", approval ? runStatusLabel(approval.status).toUpperCase() : "HUMAN OVERSIGHT", approval ? open("Review high-value scenario", "controller@t-bank", `#/trustops/${approval.run_id}`) : "", open("Open controller approval queue", "controller@t-bank", "#/approvals", true)),
+      step("04", "Verify the proof", "Inspect the policy, proposal and mock execution receipt. Verify the stored hash chain against the current evidence records.", completed ? "EXECUTED IN MOCK ERP" : "EVIDENCE FABRIC", completed ? open("Inspect completed run", "admin@t-bank", `#/trustops/${completed.run_id}`) : "", completed ? el("button", { type: "button", class: "secondary", onclick: safe(async () => {
+        const result = await api(`/v1/evidence/${completed.run_id}/verify`, { method: "POST" });
+        verification.replaceChildren(el("strong", {}, result.valid ? "Integrity verified" : "Integrity check failed"), el("p", {}, `${result.records.length} evidence records · ${result.integrity === "local_hash_chain_only" ? "local hash chain; no production signature" : result.integrity}`));
+      }) }, "Verify evidence now") : "", verification)),
+    el("section", { class: "demo-boundaries" }, el("h3", {}, "What is running in this demonstration?"),
+      el("div", { class: "demo-boundary-grid" },
+        el("div", {}, el("strong", {}, "Working application"), el("p", {}, "Uploads, questionnaire rules, published report downloads, policy gates, role checks, approvals, mock execution and hash-chain verification.")),
+        el("div", {}, el("strong", {}, "Document AI"), el("p", {}, state.cfg.assessment_model === "configured" ? "A model is configured. Confirm its live availability before presenting document-generated findings." : state.cfg.assessment_model === "demo" ? "Scripted test model: outputs are examples, not customer analysis." : "Not connected. The prepared report uses questionnaire rules, not an LLM reading the documents.")),
+        el("div", {}, el("strong", {}, "Production integrations"), el("p", {}, "Mock SAP only; no live ERP writes. Evidence uses a local hash chain. Production signatures and deployment acceptance require separate verification.")))),
+    el("section", { class: "demo-presenter" }, el("div", {}, el("strong", {}, "Presenter controls"), el("p", { class: "help" }, "Local seeded roles only. Role permissions are still enforced by the backend.")),
+      el("div", { class: "row" }, open("Customer view", "admin@t-bank", "#/demo", true), open("Controller view", "controller@t-bank", "#/demo", true), open("Reviewer view", "reviewer@cloudseals", "#/demo", true), open("Architect view", "architect@cloudseals", "#/demo", true)))));
+};
+
 const SAMPLE_AI_REGISTER = "SYNTHETIC SAMPLE ONLY — Example Bank, not a real customer.\nAI Register. Our credit scoring model assigns loan applicants a score and decides approvals automatically. The chatbot answers customer questions about accounts.\nCredit scoring owner: Lending team. Inputs: application details and repayment history. Human review: appeals only.\nChatbot owner: Customer support. Inputs: approved account FAQs. It gives information and cannot change accounts.\nUnknown: model test results, retention periods and approval records have not been supplied.\n";
 const SAMPLE_AI_POLICY = "SYNTHETIC SAMPLE ONLY — Example Bank.\nAI policy example: customer support staff review chatbot complaints. Loan applicants may request a human review. Access is limited to authorised teams.\nMissing evidence: no signed model validation report, retention schedule or approval log is supplied in this sample. Missing evidence does not prove a control is absent.\n";
 function sampleDownload(name, text) {
