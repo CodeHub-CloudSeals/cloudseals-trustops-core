@@ -112,11 +112,13 @@ INVENTORY_SYSTEM = (
 def run_inventory(client: Optional[ModelClient], docs: list[dict]) -> dict:
     """docs: [{evidence_id, filename, text}]. Returns candidate use cases, each grounded in a verbatim quote."""
     if client is None:
-        return {"mode": "unavailable", "items": [], "rejected": 0,
-                "note": "A model is required to read documents. Configure Vertex AI (TAAD_LLM_PROVIDER=vertex) or Bedrock."}
+        return {"mode": "unavailable", "status": "unavailable", "items": [], "rejected": 0,
+                "note": "A model is required to read documents. Configure an approved OpenAI, Vertex AI or Bedrock model connection."}
     items: list[dict] = []
     rejected = 0
+    documents = []
     for doc in docs[:MAX_DOCS]:
+        before_items, before_rejected = len(items), rejected
         text = doc["text"]
         try:
             raw = _ask(client, INVENTORY_SYSTEM, f"<untrusted filename={json.dumps(doc['filename'])}>{text}</untrusted>", 6000)
@@ -125,6 +127,7 @@ def run_inventory(client: Optional[ModelClient], docs: list[dict]) -> dict:
                 raise ValueError("use_cases")
         except Exception:
             rejected += 1
+            documents.append({"evidence_id": doc["evidence_id"], "status": "failed", "accepted": 0, "rejected": 1})
             continue
         haystack = _norm(text)
         for uc in candidates[:40]:
@@ -151,7 +154,11 @@ def run_inventory(client: Optional[ModelClient], docs: list[dict]) -> dict:
                     "injection_flagged": bool(INJECTION.search(text)), "status": "UNREVIEWED"})
             except Exception:
                 rejected += 1
-    return {"mode": "model", "items": items, "rejected": rejected,
+        documents.append({"evidence_id": doc["evidence_id"], "status": "completed" if rejected == before_rejected else "partial",
+                          "accepted": len(items) - before_items, "rejected": rejected - before_rejected})
+    status = "completed" if not rejected else "partial" if items else "failed"
+    return {"mode": "model", "status": status, "items": items, "rejected": rejected, "documents": documents,
+            "successful_document_ids": [d["evidence_id"] for d in documents if d["status"] == "completed"],
             "note": "Candidates only. Risk tiers are not legal determinations; a CloudSeals reviewer must validate each use case."}
 
 
@@ -179,8 +186,8 @@ def run_gap_analysis(client: Optional[ModelClient], framework_id: str, use_cases
     if framework_id not in FRAMEWORKS:
         raise KeyError(framework_id)
     if client is None:
-        return {"mode": "unavailable", "items": [], "rejected": 0, "framework_id": framework_id,
-                "note": "A model is required for gap analysis. Configure Vertex AI (TAAD_LLM_PROVIDER=vertex) or Bedrock."}
+        return {"mode": "unavailable", "status": "unavailable", "items": [], "rejected": 0, "framework_id": framework_id,
+                "note": "A model is required for gap analysis. Configure an approved OpenAI, Vertex AI or Bedrock model connection."}
     fw = FRAMEWORKS[framework_id]
     slim = [{k: u[k] for k in ("use_case_id", "name", "description", "business_owner", "technical_owner", "model_type",
                                "foundation_models_used", "decision_authority", "data_sources", "risk_tier", "source_quotes")}
@@ -194,7 +201,7 @@ def run_gap_analysis(client: Optional[ModelClient], framework_id: str, use_cases
         if not isinstance(findings, list):
             raise ValueError("findings")
     except Exception:
-        return {"mode": "model", "items": [], "rejected": 1, "framework_id": framework_id,
+        return {"mode": "model", "status": "failed", "items": [], "rejected": 1, "framework_id": framework_id,
                 "note": "The model did not return a usable analysis. Nothing was recorded."}
     for f in findings[:60]:
         try:
@@ -214,5 +221,6 @@ def run_gap_analysis(client: Optional[ModelClient], framework_id: str, use_cases
                 "status": "UNREVIEWED"})
         except Exception:
             rejected += 1
-    return {"mode": "model", "items": items, "rejected": rejected, "framework_id": framework_id,
+    return {"mode": "model", "status": "completed" if not rejected else "partial" if items else "failed",
+            "items": items, "rejected": rejected, "framework_id": framework_id,
             "note": "Candidate gaps. Not legal determinations; a CloudSeals reviewer must validate each one."}

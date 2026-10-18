@@ -29,8 +29,8 @@ def _ask(client: ModelClient, system: str, user: str, max_tokens: int) -> Any:
 
 
 def _unavailable(extra: dict) -> dict:
-    return {"mode": "unavailable", "rejected": 0, **extra,
-            "note": "A model is required. Configure Vertex AI (TAAD_LLM_PROVIDER=vertex) or Bedrock."}
+    return {"mode": "unavailable", "status": "unavailable", "rejected": 0, **extra,
+            "note": "A model is required. Configure an approved OpenAI, Vertex AI or Bedrock model connection."}
 
 
 # ---------------- maturity scorer ----------------
@@ -71,8 +71,8 @@ def run_maturity(client: Optional[ModelClient], use_cases: list[dict], gaps: lis
         pri = [_clean(x, 400) for x in (raw.get("improvement_priorities") or [])][:4]
         notes = _clean(raw.get("notes_for_architect") or "No notes.", 2000)
     except Exception:
-        return {"mode": "model", "maturity": None, "rejected": 1, "note": "The model did not return a usable assessment. Nothing was recorded."}
-    return {"mode": "model", "rejected": 0, "note": "Candidate scores for reviewer validation. Not an audit opinion.", "maturity": {
+        return {"mode": "model", "status": "failed", "maturity": None, "rejected": 1, "note": "The model did not return a usable assessment. Nothing was recorded."}
+    return {"mode": "model", "status": "completed", "rejected": 0, "note": "Candidate scores for reviewer validation. Not an audit opinion.", "maturity": {
         "scores": out_scores, "overall_score": round(sum(out_scores.values()) / 5, 2), "rationale": out_rationale, "evidence_refs": out_refs,
         "improvement_priorities": pri, "notes_for_architect": notes, "capped_for_missing_evidence": capped,
         "input_use_cases": len(use_cases), "input_gaps": len(gaps), "status": "UNREVIEWED"}}
@@ -120,7 +120,7 @@ def run_roadmap(client: Optional[ModelClient], gaps: list[dict], maturity: Optio
         if not isinstance(raw_items, list):
             raise ValueError("items")
     except Exception:
-        return {"mode": "model", "items": [], "rejected": 1, "uncovered_gaps": [], "summary": None,
+        return {"mode": "model", "status": "failed", "items": [], "rejected": 1, "uncovered_gaps": [], "summary": None,
                 "note": "The model did not return a usable roadmap. Nothing was recorded."}
     staged, rejected, seen_titles = [], 0, set()
     for it in raw_items[:40]:
@@ -164,7 +164,8 @@ def run_roadmap(client: Optional[ModelClient], gaps: list[dict], maturity: Optio
     except Exception:
         exec_summary = ""
     items.sort(key=lambda i: (BANDS.index(i["timeline_band"]), i["priority"]))
-    return {"mode": "model", "items": items, "rejected": rejected, "uncovered_gaps": uncovered,
+    return {"mode": "model", "status": "completed" if not rejected else "partial" if items else "failed",
+            "items": items, "rejected": rejected, "uncovered_gaps": uncovered,
             "summary": {"total_items": len(items), "by_timeline": by_band, "total_effort_days": round(sum(i["effort_days"] for i in items), 1),
                         "executive_summary": exec_summary, "dependency_cycle_removed": cycle},
             "note": "Candidate roadmap. Effort and cost are estimates; a CloudSeals reviewer validates each item."}
@@ -339,9 +340,9 @@ def run_overlay(client: Optional[ModelClient], use_cases: list[dict], gaps: list
             raise ValueError("differences")
         commentary = _clean(raw["gap_commentary"], 6000)
     except Exception:
-        return {"mode": "model", "overlay": None, "rejected": 1, "note": "The model did not return a usable architecture description. Nothing was recorded."}
+        return {"mode": "model", "status": "failed", "overlay": None, "rejected": 1, "note": "The model did not return a usable architecture description. Nothing was recorded."}
     covered = {n["principle"] for n in target["nodes"] if n["principle"]}
-    return {"mode": "model", "rejected": 0, "note": "Candidate diagrams for reviewer validation. Systems the data does not evidence are drawn as unknowns.",
+    return {"mode": "model", "status": "completed", "rejected": 0, "note": "Candidate diagrams for reviewer validation. Systems the data does not evidence are drawn as unknowns.",
             "overlay": {"current": current, "target": target, "gap_commentary": commentary, "key_differences": diffs,
                         "principles_missing_from_target": sorted({"P1", "P2", "P3", "P4", "P5"} - covered), "status": "UNREVIEWED"}}
 

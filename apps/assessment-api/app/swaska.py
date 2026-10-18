@@ -39,10 +39,15 @@ class BedrockModelClient:
 
 def default_client() -> Optional[ModelClient]:
     from . import llm
+    if llm.provider() == "openai":
+        return llm.OpenAIModelClient()
     if llm.provider() == "vertex":
         return llm.vertex_client()
-    if os.environ.get("TAAD_SWASKA_MODEL") == "bedrock":
-        return BedrockModelClient(os.environ["TAAD_BEDROCK_MODEL_ID"], os.environ.get("AWS_REGION", "eu-west-2"))
+    if llm.provider() == "bedrock":
+        model_id = os.environ.get("TAAD_BEDROCK_MODEL_ID") or os.environ.get("TRUSTOPS_AGENT_MODEL_ID")
+        if not model_id:
+            raise ValueError("Bedrock requires TAAD_BEDROCK_MODEL_ID or TRUSTOPS_AGENT_MODEL_ID")
+        return BedrockModelClient(model_id, os.environ.get("AWS_REGION", "eu-west-2"))
     return None
 
 

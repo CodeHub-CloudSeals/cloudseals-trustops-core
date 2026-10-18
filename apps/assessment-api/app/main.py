@@ -569,6 +569,32 @@ def findings(aid: str, p: Principal = Depends(principal)):
     return {"items": items}
 
 
+@app.get("/v1/report-library")
+def report_library(assessment_id: Optional[str] = None, p: Principal = Depends(principal)):
+    """Customer-safe metadata for both published questionnaire reports and released document diagnostics."""
+    if assessment_id:
+        get_assessment(p, assessment_id)
+    items = []
+    with STORE.lock:
+        visible = {aid: a for aid, a in STORE.assessments.items()
+                   if (p.is_staff or a["tenant_id"] == p.tenant_id) and (not assessment_id or aid == assessment_id)}
+        for r in STORE.reports.values():
+            aid = r["assessment_id"]
+            if aid not in visible or r["status"] != "published":
+                continue
+            a = visible[aid]
+            items.append({"kind": "questionnaire", "assessment_id": aid, "ai_system_name": a["ai_system_name"], "industry": a["industry"],
+                          "report_id": r["report_id"], "version": r["version"], "status": "published",
+                          "download_urls": {f: f"/v1/assessments/{aid}/reports/{r['report_id']}/download?format={f}" for f in ("pdf", "docx")}})
+        for aid, a in visible.items():
+            for r in STORE.inventory.get(aid, {}).get("published_diagnostics", []):
+                items.append({"kind": "document_diagnostic", "assessment_id": aid, "ai_system_name": r["system_name"], "industry": a["industry"],
+                              "report_id": r["report_id"], "version": r["version"], "status": "published", "published_at": r["published_at"],
+                              "download_urls": {"html": f"/v1/assessments/{aid}/diagnostic-report?report_id={r['report_id']}"}})
+    items.sort(key=lambda r: (r.get("published_at", 0), r["version"], r["report_id"]), reverse=True)
+    return {"items": items, "total": len(items)}
+
+
 @app.get("/v1/assessments/{aid}/reports")
 def reports(aid: str, p: Principal = Depends(principal)):
     get_assessment(p, aid)
@@ -779,9 +805,18 @@ def _inv(aid: str) -> dict:
 
 def _merge(existing: list[dict], fresh: list[dict], key: str, keep: Any) -> list[dict]:
     """Re-running an agent replaces its unreviewed output; anything a reviewer already decided is kept untouched."""
-    decided = {x[key]: x for x in existing if x["status"] != "UNREVIEWED"}
-    kept_other = [x for x in existing if x["status"] == "UNREVIEWED" and not keep(x)]
-    return kept_other + list(decided.values()) + [x for x in fresh if x[key] not in decided]
+    preserved = {x[key]: x for x in existing if x["status"] != "UNREVIEWED" or not keep(x)}
+    return list(preserved.values()) + [x for x in fresh if x[key] not in preserved]
+
+
+def require_analysis_result(result: dict) -> None:
+    """Unavailable or invalid model output must never masquerade as a successful analysis or erase saved work."""
+    if result.get("mode") == "unavailable":
+        raise err(503, "model_unavailable", "Document analysis is not connected. Configure a model and verify its live connection. "
+                  "Existing analysis is unchanged.")
+    if result.get("status") == "failed":
+        raise err(502, "analysis_failed", "The model did not return usable analysis. Check the model connection and retry. Existing analysis is unchanged.")
+
 
 
 @app.get("/v1/frameworks")
@@ -812,10 +847,14 @@ def run_inventory(aid: str, body: InventoryRunRequest, p: Principal = Depends(pr
                 e["content_type"], OBJECTS.get(a["tenant_id"], "evidence", e["evidence_id"]))})
         except Exception:
             skipped.append(e["filename"])
-    result = use_cases.run_inventory(SWASKA_CLIENT, [d for d in docs if d["text"].strip()])
+    readable = [d for d in docs if d["text"].strip()]
+    if not readable:
+        raise err(422, "no_readable_documents", "Upload a clean supported document containing readable text before running analysis.")
+    result = use_cases.run_inventory(SWASKA_CLIENT, readable)
+    require_analysis_result(result)
     with STORE.lock:
         inv = _inv(aid)
-        ran = {d["evidence_id"] for d in docs}
+        ran = set(result["successful_document_ids"])
         inv["use_cases"] = _merge(inv["use_cases"], result["items"], "use_case_id", lambda x: x["evidence_id"] in ran)
         audit(p, "agent.inventory", aid)
     return {**result, "documents_read": len(docs), "documents_skipped": skipped,
@@ -867,9 +906,10 @@ def run_gap_analysis(aid: str, body: GapRunRequest, p: Principal = Depends(princ
     if not validated:
         raise err(409, "no_validated_use_cases", "Validate at least one AI use case before running gap analysis")
     result = use_cases.run_gap_analysis(SWASKA_CLIENT, body.framework_id, validated)
+    require_analysis_result(result)
     with STORE.lock:
         inv = _inv(aid)
-        inv["gaps"] = _merge(inv["gaps"], result["items"], "gap_id", lambda x: x["framework_id"] == body.framework_id)
+        inv["gaps"] = _merge(inv["gaps"], result["items"], "gap_id", lambda x: x["framework_id"] == body.framework_id and result["status"] == "completed")
         audit(p, "agent.gap_analysis", f"{aid}/{body.framework_id}")
     return {**result, "agent_id": taad_agents.GAP, "advisory_only": True, "gaps": inv["gaps"]}
 
@@ -897,6 +937,7 @@ def run_maturity(aid: str, p: Principal = Depends(principal)):
     if not ucs:
         raise err(409, "no_validated_use_cases", "Validate at least one AI use case before maturity scoring")
     result = studio.run_maturity(SWASKA_CLIENT, ucs, [g for g in inv["gaps"] if g["status"] == "VALIDATED"])
+    require_analysis_result(result)
     with STORE.lock:
         if result["maturity"] and not (inv["maturity"] and inv["maturity"]["status"] == "VALIDATED"):
             inv["maturity"] = result["maturity"]        # a validated score is never silently replaced
@@ -928,9 +969,9 @@ def run_roadmap(aid: str, p: Principal = Depends(principal)):
     if not gaps and not mat:
         raise err(409, "nothing_validated", "Validate at least one gap or the maturity score before building a roadmap")
     result = studio.run_roadmap(SWASKA_CLIENT, gaps, mat)
+    require_analysis_result(result)
     with STORE.lock:
-        decided = {i["item_id"]: i for i in inv["roadmap"] if i["status"] != "UNREVIEWED"}
-        inv["roadmap"] = list(decided.values()) + [i for i in result["items"] if i["item_id"] not in decided]
+        inv["roadmap"] = _merge(inv["roadmap"], result["items"], "item_id", lambda x: result["status"] == "completed")
         audit(p, "agent.roadmap", aid)
     return {**result, "agent_id": taad_agents.ROADMAP, "advisory_only": True, "roadmap": inv["roadmap"]}
 
@@ -958,6 +999,7 @@ def run_overlay(aid: str, p: Principal = Depends(principal)):
     if not ucs:
         raise err(409, "no_validated_use_cases", "Validate at least one AI use case before drawing the architecture")
     result = studio.run_overlay(SWASKA_CLIENT, ucs, [g for g in inv["gaps"] if g["status"] == "VALIDATED"])
+    require_analysis_result(result)
     with STORE.lock:
         if result["overlay"] and not (inv["overlay"] and inv["overlay"]["status"] == "VALIDATED"):
             inv["overlay"] = result["overlay"]
@@ -1645,8 +1687,7 @@ def agentops(p: Principal = Depends(principal)):
     model_configured = bool(llm.provider())
     return {"mode": "sandbox" if runtime_enabled() else "unavailable",
             "agent_mode": f"{llm.provider()}_configured" if llm.provider() else "deterministic",
-            "model_id": (os.environ.get("TAAD_VERTEX_MODEL", llm.DEFAULT_VERTEX_MODEL) if llm.provider() == "vertex"
-                         else os.environ.get("TRUSTOPS_AGENT_MODEL_ID")) if model_configured else None,
+            "model_id": llm.configured_model_id() if model_configured else None,
             "evidence_signing": "cloud_kms" if os.environ.get("TAAD_KMS_SIGNING_KEY_VERSION") else "local_hash_chain",
             "agents": trustops_runtime.AGENT_MANIFESTS,
             "workflow_pack": trustops_runtime.PACK_ID, "workflow_version": trustops_runtime.PACK_VERSION,
@@ -2079,7 +2120,7 @@ def service_health(probe: bool = False, p: Principal = Depends(principal)):
 
     provider = llm.provider()
     kms_key = os.environ.get("TAAD_KMS_SIGNING_KEY_VERSION", "")
-    model_id = os.environ.get("TAAD_VERTEX_MODEL", llm.DEFAULT_VERTEX_MODEL) if provider == "vertex" else os.environ.get("TRUSTOPS_AGENT_MODEL_ID")
+    model_id = llm.configured_model_id()
     model = {"configured": bool(provider), "provider": provider or None, "model_id": model_id if provider else None}
     if probe and SWASKA_CLIENT is not None:
         model["probe"] = timed(lambda: SWASKA_CLIENT.complete("Reply with the JSON object {\"ok\": true}.", "ping", max_tokens=20))

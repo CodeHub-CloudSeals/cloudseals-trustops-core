@@ -899,9 +899,7 @@ routes.dashboard = async () => {
 };
 
 routes.reports = async () => {
-  const [{items: assessments}, {items: runs}] = await Promise.all([api("/v1/assessments"),api("/v1/runs?limit=100")]);
-  const groups = await Promise.all(assessments.map(async assessment => ({assessment, reports:(await api(`/v1/assessments/${assessment.assessment_id}/reports`)).items})));
-  const published = groups.flatMap(({assessment,reports}) => reports.filter(r=>r.status === "published").map(report=>({assessment,report})));
+  const [{items: assessments}, {items: runs}, {items: published}] = await Promise.all([api("/v1/assessments"),api("/v1/runs?limit=100"),api("/v1/report-library")]);
   const content = el("div",{class:"results-content"});
   const tabs = el("div",{class:"workspace-tabs",role:"tablist","aria-label":"Result type"});
   const query = el("input",{type:"search",placeholder:"Search by AI system or receipt…","aria-label":"Search reports and results"});
@@ -911,12 +909,12 @@ routes.reports = async () => {
     const term=query.value.trim().toLowerCase();
     content.setAttribute("role","tabpanel"); content.id="results-panel"; content.setAttribute("aria-labelledby",`results-tab-${selected}`);
     if(selected === "runs") { const filtered=runs.filter(r=>`${r.receipt_id} ${runStatusLabel(r.status)} ${decisionLabel(r)}`.toLowerCase().includes(term)); content.replaceChildren(el("section",{class:"module-panel"},el("h3",{},"Decisions and execution traces"),el("p",{class:"help"},"Open a result to inspect the proposal, policy decision, agent steps and evidence."),filtered.length ? runTable(filtered) : el("p",{class:"empty-state"},"No workflow results match your search."))); return; }
-    const filtered=published.filter(({assessment})=>assessment.ai_system_name.toLowerCase().includes(term));
-    content.replaceChildren(el("div",{class:"report-library"},filtered.length ? filtered.map(({assessment:a,report:r})=>el("article",{class:"report-library-card"},
+    const filtered=published.filter(r=>`${r.ai_system_name} ${r.kind}`.toLowerCase().includes(term));
+    content.replaceChildren(el("div",{class:"report-library"},filtered.length ? filtered.map(r=>el("article",{class:"report-library-card"},
       el("div",{class:"report-cover","aria-hidden":"true"},el("span",{},"CLOUDSEALS"),el("strong",{},"AI assessment"),el("span",{},"REPORT"),el("div",{class:"report-cover-lines"})),
-      el("div",{class:"report-library-copy"},el("span",{class:"tag ok"},"Published"),el("h3",{},a.ai_system_name),el("p",{},`${a.industry} · Version ${r.version}`),el("p",{class:"help"},"Findings, supporting answers and prioritised improvement actions, released after review."),
-        el("div",{class:"row"},el("button",{onclick:safe(()=>dl(`/v1/assessments/${a.assessment_id}/reports/${r.report_id}/download?format=pdf`,"TrustOps-assessment.pdf"))},"Download PDF ↓"),el("button",{class:"secondary",onclick:safe(()=>dl(`/v1/assessments/${a.assessment_id}/reports/${r.report_id}/download?format=docx`,"TrustOps-assessment.docx"))},"Word")),
-        el("a",{class:"text-link",href:`#/assessment/${a.assessment_id}`},"View assessment & findings →")))) : el("div",{class:"module-panel empty-state"},"No published reports match your search. Reports appear here after review and publication.")),
+      el("div",{class:"report-library-copy"},el("span",{class:"tag ok"},"Published"),el("h3",{},r.ai_system_name),el("p",{},`${r.industry} · Version ${r.version} · ${r.kind === "document_diagnostic" ? "Document diagnostic" : "Questionnaire assessment"}`),el("p",{class:"help"},r.kind === "document_diagnostic" ? "Reviewed AI inventory, framework gaps, maturity and improvement roadmap." : "Findings, supporting answers and prioritised improvement actions, released after review."),
+        el("div",{class:"row"},Object.entries(r.download_urls).map(([format,url],index)=>el("button",{class:index ? "secondary" : "",onclick:safe(()=>dl(url,`TrustOps-${r.kind}-v${r.version}.${format}`))},`Download ${format === "docx" ? "Word" : format.toUpperCase()} ↓`))),
+        el("a",{class:"text-link",href:`#/${r.kind === "document_diagnostic" ? "use-cases" : "assessment"}/${r.assessment_id}`},"View assessment & findings →")))) : el("div",{class:"module-panel empty-state"},"No published reports match your search. Reports appear here after review and publication.")),
       el("section",{class:"workspace-note"},el("p",{},"Looking for a report still in progress? Open its assessment to check the review status."),el("a",{href:"#/assessments"},"View assessments →")));
   };
   query.addEventListener("input",draw);draw();
@@ -1276,7 +1274,7 @@ routes["service-health"] = async () => {
         card("Evidence storage", h.evidence_store.backend === "local-disk" ? "warn" : "ok", [["Backend", h.evidence_store.backend]]),
         card("Malware scanning", h.malware_scanner.probe ? (h.malware_scanner.probe.ok ? "ok" : "bad") : h.malware_scanner.configured ? "ok" : "warn",
           [["Engine", h.malware_scanner.engine || "Basic byte checks only (no scanner configured)"], ["Uploads", h.malware_scanner.configured ? "Scanned before use; rejected if the scanner is down" : "Checked for known signatures only"]], probeLine(h.malware_scanner.probe)),
-        card("AI model", h.model.probe ? (h.model.probe.ok ? "ok" : "bad") : h.model.configured ? "ok" : "off", [["Provider", h.model.provider || "none (deterministic agents only)"], ["Model", h.model.model_id || "n/a"]], probeLine(h.model.probe)),
+        card("AI model", h.model.probe ? (h.model.probe.ok ? "ok" : "bad") : h.model.configured ? "warn" : "off", [["Provider", h.model.provider || "none (deterministic agents only)"], ["Model", h.model.model_id || "n/a"], ["Connection", h.model.probe ? h.model.probe.ok ? "Verified in this live check" : "Live check failed" : h.model.configured ? "Configured; live check not run" : "Not configured"]], probeLine(h.model.probe)),
         card("Evidence signing", h.evidence_signing.probe ? (h.evidence_signing.probe.ok ? "ok" : "bad") : h.evidence_signing.configured ? "ok" : "off",
           [["Signer", h.evidence_signing.configured ? "Cloud KMS" : "Local hash chain only"], ["Key version", h.evidence_signing.key_version ? h.evidence_signing.key_version.split("/").slice(-5).join("/") : "n/a"]], probeLine(h.evidence_signing.probe)),
         card("Workflow runtime", h.runtime.mode === "sandbox" ? "warn" : "off", [["Mode", h.runtime.mode === "sandbox" ? "Sandbox (mock connector)" : "Unavailable in this environment"]]),
@@ -1586,10 +1584,13 @@ function scoreBar(score) { const f = el("b", { role: "presentation" }); f.style.
 function maturityPanel(aid, inv, canReview, validatedUc, redraw) {
   const m = inv.maturity;
   const run = el("button", { disabled: !validatedUc, title: validatedUc ? "" : "Validate at least one use case first", onclick: safe(async (e) => {
-    e.currentTarget.disabled = true; e.currentTarget.textContent = "Scoring…";
-    const r = await api(`/v1/assessments/${aid}/maturity/run`, { method: "POST" });
-    useCaseNote = r.mode === "unavailable" ? r.note : r.maturity ? "Maturity score drafted for review." : r.note;
-    await redraw();
+    const button = e.currentTarget, label = button.textContent;
+    button.disabled = true; button.setAttribute("aria-busy", "true"); button.textContent = "Scoring…";
+    try {
+      const r = await api(`/v1/assessments/${aid}/maturity/run`, { method: "POST" });
+      useCaseNote = r.mode === "unavailable" ? r.note : r.maturity ? "Maturity score drafted for review." : r.note;
+      await redraw();
+    } finally { button.disabled = false; button.setAttribute("aria-busy", "false"); button.textContent = label; }
   }) }, m ? "Re-run maturity scoring" : "Run maturity scoring");
   const body = m ? el("div", {},
     el("div", { class: "mat-head" }, el("strong", { class: "mat-overall" }, `${m.overall_score}`), el("span", {}, " / 5 overall"), statusChip(m.status)),
@@ -1608,10 +1609,13 @@ function maturityPanel(aid, inv, canReview, validatedUc, redraw) {
 function roadmapPanel(aid, inv, canReview, ready, redraw) {
   const items = inv.roadmap || [];
   const run = el("button", { disabled: !ready, title: ready ? "" : "Validate a gap or the maturity score first", onclick: safe(async (e) => {
-    e.currentTarget.disabled = true; e.currentTarget.textContent = "Building roadmap…";
-    const r = await api(`/v1/assessments/${aid}/roadmap/run`, { method: "POST" });
-    useCaseNote = r.mode === "unavailable" ? r.note : `${r.items.length} roadmap item(s) drafted${r.rejected ? `; ${r.rejected} unusable item(s) were dropped` : ""}${r.uncovered_gaps?.length ? `; ${r.uncovered_gaps.length} critical or high gap(s) are not covered yet` : ""}.`;
-    await redraw();
+    const button = e.currentTarget, label = button.textContent;
+    button.disabled = true; button.setAttribute("aria-busy", "true"); button.textContent = "Building roadmap…";
+    try {
+      const r = await api(`/v1/assessments/${aid}/roadmap/run`, { method: "POST" });
+      useCaseNote = r.mode === "unavailable" ? r.note : `${r.items.length} roadmap item(s) drafted${r.rejected ? `; ${r.rejected} unusable item(s) were dropped` : ""}${r.uncovered_gaps?.length ? `; ${r.uncovered_gaps.length} critical or high gap(s) are not covered yet` : ""}.`;
+      await redraw();
+    } finally { button.disabled = false; button.setAttribute("aria-busy", "false"); button.textContent = label; }
   }) }, items.length ? "Re-run roadmap" : "Build roadmap");
   const card = (i) => el("article", { class: `uc-card uc-card-${String(i.status).toLowerCase()}` },
     el("div", { class: "uc-head" }, el("h4", {}, i.title), el("span", { class: "tag" }, i.responsible_role), el("span", { class: "tag" }, `${i.effort_days} person-days`), el("span", { class: "tag" }, `cost: ${i.estimated_cost_band}`), statusChip(i.status)),
@@ -1632,10 +1636,13 @@ function roadmapPanel(aid, inv, canReview, ready, redraw) {
 function overlayPanel(aid, inv, canReview, validatedUc, redraw) {
   const o = inv.overlay;
   const run = el("button", { disabled: !validatedUc, title: validatedUc ? "" : "Validate at least one use case first", onclick: safe(async (e) => {
-    e.currentTarget.disabled = true; e.currentTarget.textContent = "Drawing…";
-    const r = await api(`/v1/assessments/${aid}/overlay/run`, { method: "POST" });
-    useCaseNote = r.mode === "unavailable" ? r.note : r.overlay ? "Architecture diagrams drafted for review." : r.note;
-    await redraw();
+    const button = e.currentTarget, label = button.textContent;
+    button.disabled = true; button.setAttribute("aria-busy", "true"); button.textContent = "Drawing…";
+    try {
+      const r = await api(`/v1/assessments/${aid}/overlay/run`, { method: "POST" });
+      useCaseNote = r.mode === "unavailable" ? r.note : r.overlay ? "Architecture diagrams drafted for review." : r.note;
+      await redraw();
+    } finally { button.disabled = false; button.setAttribute("aria-busy", "false"); button.textContent = label; }
   }) }, o ? "Redraw architecture" : "Draw architecture");
   const img = (svg, alt) => el("img", { class: "overlay-img", alt, src: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}` });
   const body = o ? el("div", {}, el("div", { class: "row" }, statusChip(o.status)),
@@ -1724,10 +1731,13 @@ routes["use-cases"] = async (aidArg) => {
   const picker = el("label", { class: "uc-picker" }, "Assessment", el("select", { onchange: (e) => go(`#/use-cases/${e.target.value}`) },
     assessments.map((a) => el("option", { value: a.assessment_id, selected: a.assessment_id === aid }, `${a.ai_system_name} (${a.status})`))));
   const runBtn = el("button", { disabled: !docs.length, title: docs.length ? "" : "Upload a clean PDF, Word or text document first", onclick: safe(async (e) => {
-    e.currentTarget.disabled = true; e.currentTarget.textContent = "Reading documents…";
-    const r = await api(`/v1/assessments/${aid}/inventory/run`, { method: "POST", body: {} });
-    useCaseNote = r.mode === "unavailable" ? r.note : `${r.items.length} candidate use case(s) found in ${r.documents_read} document(s)${r.rejected ? `; ${r.rejected} unverifiable candidate(s) were dropped` : ""}.`;
-    await redraw();
+    const button = e.currentTarget, label = button.textContent;
+    button.disabled = true; button.setAttribute("aria-busy", "true"); button.textContent = "Reading documents…";
+    try {
+      const r = await api(`/v1/assessments/${aid}/inventory/run`, { method: "POST", body: {} });
+      useCaseNote = r.mode === "unavailable" ? r.note : `${r.status === "partial" ? "Partial analysis; previous results for incomplete documents were retained. " : ""}${r.items.length} candidate use case(s) found in ${r.documents_read} document(s)${r.rejected ? `; ${r.rejected} unverifiable candidate(s) were dropped` : ""}.`;
+      await redraw();
+    } finally { button.disabled = false; button.setAttribute("aria-busy", "false"); button.textContent = label; }
   }) }, "Find AI use cases in the documents");
   const useCasePanel = el("section", { class: "module-panel" },
     el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 1 · INVENTORY AGENT"), el("h3", {}, `${inv.use_cases.length} candidate use case${inv.use_cases.length === 1 ? "" : "s"}`))),
@@ -1738,10 +1748,13 @@ routes["use-cases"] = async (aidArg) => {
   const validated = inv.use_cases.filter((u) => u.status === "VALIDATED").length;
   const fwSel = el("select", { "aria-label": "Framework" }, fw.items.map((f) => el("option", { value: f.id }, `${f.short_name} (${f.requirement_count} requirements)`)));
   const gapRun = el("button", { disabled: !validated, title: validated ? "" : "Validate at least one use case first", onclick: safe(async (e) => {
-    e.currentTarget.disabled = true; e.currentTarget.textContent = "Analysing…";
-    const r = await api(`/v1/assessments/${aid}/gap-analysis/run`, { method: "POST", body: { framework_id: fwSel.value } });
-    useCaseNote = r.mode === "unavailable" ? r.note : `${r.items.length} candidate gap(s) for ${fwSel.selectedOptions[0].textContent.split(" (")[0]}${r.rejected ? `; ${r.rejected} unverifiable candidate(s) were dropped` : ""}.`;
-    await redraw();
+    const button = e.currentTarget, label = button.textContent;
+    button.disabled = true; button.setAttribute("aria-busy", "true"); button.textContent = "Analysing…";
+    try {
+      const r = await api(`/v1/assessments/${aid}/gap-analysis/run`, { method: "POST", body: { framework_id: fwSel.value } });
+      useCaseNote = r.mode === "unavailable" ? r.note : `${r.items.length} candidate gap(s) for ${fwSel.selectedOptions[0].textContent.split(" (")[0]}${r.rejected ? `; ${r.rejected} unverifiable candidate(s) were dropped` : ""}.`;
+      await redraw();
+    } finally { button.disabled = false; button.setAttribute("aria-busy", "false"); button.textContent = label; }
   }) }, "Run gap analysis");
   const gaps = [...inv.gaps].sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity));
   const gapPanel = canReview ? el("section", { class: "module-panel" },

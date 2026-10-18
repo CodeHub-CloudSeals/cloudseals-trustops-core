@@ -131,3 +131,62 @@ def test_customers_never_see_who_reviewed_or_the_reviewers_internal_notes(review
     assert customer['use_cases'][0]['status'] == 'VALIDATED' and customer['delivery']['snapshot']['maturity']['overall_score'] == 1.5
     staff = json.dumps(c.get(f'/v1/assessments/{aid}/inventory', headers=h('reviewer@cloudseals')).json())
     assert 'reviewer@cloudseals' in staff and 'notes_for_architect' in staff                # reviewers keep the full record
+
+
+@pytest.mark.parametrize('operation,body,target', [
+    ('inventory', {}, 'use_cases'), ('gap-analysis', {'framework_id': 'eu_ai_act'}, 'gaps'),
+    ('maturity', None, 'maturity'), ('roadmap', None, 'roadmap'), ('overlay', None, 'overlay'),
+])
+@pytest.mark.parametrize('failure,expected', [(None, 503), (RuntimeError('upstream failed'), 502), ('not json', 502)])
+def test_failed_analysis_never_erases_saved_work_or_reports_success(reviewed, monkeypatch, operation, body, target, failure, expected):
+    import copy
+    c, h, aid, *_ = reviewed
+    inv = main.STORE.inventory[aid]
+    if target == 'overlay':
+        inv[target] = {'status': 'UNREVIEWED', 'marker': 'saved architecture'}
+    elif isinstance(inv[target], list):
+        for row in inv[target]:
+            row['status'] = 'UNREVIEWED'
+    else:
+        inv[target]['status'] = 'UNREVIEWED'
+    before = copy.deepcopy(inv)
+    monkeypatch.setattr(main, 'SWASKA_CLIENT', None if failure is None else Fake(failure))
+    sub = 'admin@t-bank' if operation == 'inventory' else 'reviewer@cloudseals'
+    response = c.post(f'/v1/assessments/{aid}/{operation}/run', headers=h(sub), json=body)
+    assert response.status_code == expected, response.text
+    assert response.json()['code'] == ('model_unavailable' if expected == 503 else 'analysis_failed')
+    assert inv == before
+
+
+def test_report_library_lists_both_published_types_without_leaking_drafts_or_other_tenants(reviewed):
+    import json
+
+    from tests.conftest import BANK, fill_required
+    c, h, aid, *_ = reviewed
+    assert c.get('/v1/report-library').status_code == 401
+    assert c.get('/v1/report-library', headers=h('admin@t-bank')).json()['items'] == []
+    release = publish(c, h, aid).json()
+    library = c.get('/v1/report-library', headers=h('admin@t-bank')).json()
+    assert library['total'] == 1
+    row = library['items'][0]
+    assert row['report_id'] == release['report_id'] and row['kind'] == 'document_diagnostic'
+    assert c.get(row['download_urls']['html'], headers=h('admin@t-bank')).status_code == 200
+    assert c.get(row['download_urls']['html'], headers=h('admin@t-health')).status_code == 404
+    assert c.get('/v1/report-library', headers=h('admin@t-health')).json()['items'] == []
+    assert c.get('/v1/report-library', params={'assessment_id': aid}, headers=h('admin@t-health')).status_code == 404
+    for private in ('reviewer@cloudseals', 'publication_reason', 'reviewed_by', 'snapshot', 'html": "<!doctype'):
+        assert private not in json.dumps(library)
+    fill_required(c, h, 'admin@t-bank', aid, BANK)
+    assert c.post(f'/v1/assessments/{aid}/submit', headers=h('admin@t-bank', **{'Idempotency-Key': 'submit-library'})).status_code == 202
+    draft = c.get(f'/v1/assessments/{aid}/reports', headers=h('reviewer@cloudseals')).json()['items'][0]
+    assert c.get('/v1/report-library', headers=h('reviewer@cloudseals')).json()['total'] == 1
+    approved = c.post(f'/v1/assessments/{aid}/reviews/{draft["report_id"]}/decision', headers=h('reviewer@cloudseals', **{'Idempotency-Key': 'approve-library'}),
+                      json={'decision': 'approve', 'reviewer_reason': 'Engineering test review'})
+    assert approved.status_code == 200
+    rows = c.get('/v1/report-library', headers=h('admin@t-bank')).json()['items']
+    assert {r['kind'] for r in rows} == {'document_diagnostic', 'questionnaire'}
+    questionnaire = next(r for r in rows if r['kind'] == 'questionnaire')
+    pdf = c.get(questionnaire['download_urls']['pdf'], headers=h('admin@t-bank'))
+    assert pdf.status_code == 200 and pdf.content.startswith(b'%PDF')
+    word = c.get(questionnaire['download_urls']['docx'], headers=h('admin@t-bank'))
+    assert word.status_code == 200 and word.content.startswith(b'PK')

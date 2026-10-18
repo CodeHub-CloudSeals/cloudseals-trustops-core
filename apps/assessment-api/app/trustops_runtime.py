@@ -68,6 +68,11 @@ class BedrockAgentModelClient:
 
 def configured_model_client() -> AgentModelClient | None:
     from . import llm
+    if llm.provider() == "openai":
+        try:
+            return llm.OpenAIModelClient()
+        except Exception as exc:
+            raise RuntimeErrorCode("agent_model_unavailable", "TrustOps OpenAI model client could not be initialized") from exc
     if llm.provider() == "vertex":
         try:
             return llm.vertex_client()

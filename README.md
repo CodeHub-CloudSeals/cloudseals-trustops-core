@@ -261,3 +261,5 @@ No model connection, report publication, permission or ERP capability is added b
 The overview includes selectable assessment and payment examples explaining what the customer shares, what TrustOps checks and what the customer receives. Payment scenarios explain their input before execution; saved results and the worker view explain the next action from the actual run status. Document-upload help includes sample register/policy entries, and the reports page explains assessment reports versus individual workflow decisions. Illustrations do not create findings, publish reports or execute actions.
 
 Workspace motion uses brief CSS entry transitions, staggered overview cards, interactive-card hover feedback and result reveals. Worker pulses and the busy button follow actual pending execution; progress animates between reported step counts using a persistent bar. There are no artificial run delays. New motion is enabled only when `prefers-reduced-motion: no-preference`.
+
+Model configuration, live-probe instructions and current backend limits: [docs/MODEL_CONNECTIONS.md](docs/MODEL_CONNECTIONS.md).

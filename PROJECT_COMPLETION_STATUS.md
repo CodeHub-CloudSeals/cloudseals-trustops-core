@@ -1,3 +1,10 @@
+## Backend verification update — 18 October 2026
+
+- Added server-side OpenAI Responses support for document and payment model calls; credentials are not exposed to the portal. Live activation remains pending an API key and successful synthetic/document verification.
+- Fixed analysis failures that could return success and clear previous unreviewed candidates. Unavailable/failed analyses now return 503/502 and preserve saved work. Partial inventory batches replace only fully successful documents.
+- Added the tenant-scoped report library for published questionnaire and document-analysis results. UI analysis actions recover after errors so users can retry.
+- Backend/security/contract suite: 209 tests passed. Existing Google login now refreshes, but a new real Vertex call still returns HTTP 403 billing hold. The live OpenAI/document pipeline and real ERP integration are not verified. See docs/MODEL_CONNECTIONS.md.
+
 # TAAD project completion status
 
 ## Customer diagnostic delivery milestone (2026-10-11)

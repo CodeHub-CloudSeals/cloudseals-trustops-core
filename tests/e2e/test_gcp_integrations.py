@@ -99,3 +99,18 @@ def test_provider_selection(monkeypatch):
     assert llm.provider() == "bedrock"
     monkeypatch.setenv("TAAD_LLM_PROVIDER", "vertex")
     assert llm.provider() == "vertex"
+
+
+def test_explicit_bedrock_provider_initialises_document_client(monkeypatch):
+    from app import swaska
+    seen = {}
+    def make_client(model_id, region):
+        seen.update(model_id=model_id, region=region)
+        return object()
+    monkeypatch.setenv('TAAD_LLM_PROVIDER', 'bedrock')
+    monkeypatch.delenv('TAAD_SWASKA_MODEL', raising=False)
+    monkeypatch.setenv('TAAD_BEDROCK_MODEL_ID', 'approved-model')
+    monkeypatch.setenv('AWS_REGION', 'eu-west-2')
+    monkeypatch.setattr(swaska, 'BedrockModelClient', make_client)
+    assert swaska.default_client() is not None
+    assert seen == {'model_id': 'approved-model', 'region': 'eu-west-2'}

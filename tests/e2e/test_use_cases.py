@@ -175,6 +175,7 @@ def test_inventory_to_gap_analysis_end_to_end_with_reviewer_gate(env, monkeypatc
     assert done["status"] == "REJECTED"
 
     # re-running keeps what a reviewer decided and does not resurrect or duplicate it
+    monkeypatch.setattr(main, "SWASKA_CLIENT", Fake({"use_cases": [uc()]}))
     again = c.post(f"/v1/assessments/{aid}/inventory/run", headers=h("admin@t-bank"), json={}).json()
     assert [u["status"] for u in again["use_cases"]] == ["VALIDATED"]
     # other tenants cannot reach any of it
@@ -189,8 +190,8 @@ def test_inventory_endpoint_validates_evidence_and_works_without_model(env, monk
     assert c.post(f"/v1/assessments/{aid}/inventory/run", headers=h("admin@t-bank"), json={"evidence_ids": ["nope"]}).status_code == 422
     monkeypatch.setattr(main, "SWASKA_CLIENT", None)
     upload(c, h, aid, DOC.encode())
-    r = c.post(f"/v1/assessments/{aid}/inventory/run", headers=h("admin@t-bank"), json={}).json()
-    assert r["mode"] == "unavailable" and r["use_cases"] == []
+    r = c.post(f"/v1/assessments/{aid}/inventory/run", headers=h("admin@t-bank"), json={})
+    assert r.status_code == 503 and r.json()["code"] == "model_unavailable"
 
 
 def test_framework_endpoints(env):
@@ -200,3 +201,31 @@ def test_framework_endpoints(env):
     d = c.get("/v1/frameworks/iso_42001", headers=h("admin@t-bank")).json()
     assert d["requirement_count"] == 16 and d["provenance"]["review_status"] == "PENDING_LEGAL_REVIEW"
     assert c.get("/v1/frameworks/nope", headers=h("admin@t-bank")).status_code == 404
+
+
+def test_partial_inventory_keeps_failed_document_candidates_and_replaces_only_successful_documents(env, monkeypatch):
+    c, h = env
+    aid = new_assessment(c, h, 'admin@t-bank')
+    one = upload(c, h, aid, DOC.encode(), name='one.txt')
+    two = upload(c, h, aid, DOC.encode(), name='two.txt')
+    monkeypatch.setattr(main, 'SWASKA_CLIENT', Fake({'use_cases': [uc()]}))
+    root = f'/v1/assessments/{aid}'
+    before = c.post(root + '/inventory/run', headers=h('admin@t-bank'), json={}).json()['use_cases']
+    saved_two = next(u for u in before if u['evidence_id'] == two)
+    monkeypatch.setattr(main, 'SWASKA_CLIENT', Fake({'use_cases': [uc(name='Updated scoring model')]}, RuntimeError('down')))
+    result = c.post(root + '/inventory/run', headers=h('admin@t-bank'), json={})
+    assert result.status_code == 200
+    data = result.json()
+    assert data['status'] == 'partial' and data['successful_document_ids'] == [one]
+    assert len(data['use_cases']) == 2 and saved_two in data['use_cases']
+    assert next(u for u in data['use_cases'] if u['evidence_id'] == one)['name'] == 'Updated scoring model'
+
+
+def test_inventory_requires_readable_clean_evidence(env, monkeypatch):
+    c, h = env
+    aid = new_assessment(c, h, 'admin@t-bank')
+    client = Fake({'use_cases': []})
+    monkeypatch.setattr(main, 'SWASKA_CLIENT', client)
+    r = c.post(f'/v1/assessments/{aid}/inventory/run', headers=h('admin@t-bank'), json={})
+    assert r.status_code == 422 and r.json()['code'] == 'no_readable_documents'
+    assert client.calls == []
