@@ -15,7 +15,7 @@ import secrets
 import time
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from . import kms
 
@@ -113,8 +113,13 @@ def _bounded_text(value: Any, *, field: str, limit: int = 700) -> str:
     return value.strip()
 
 
+def _progress(callback, event: str, agent_id: str, **extra) -> None:
+    if callback is not None:
+        callback({"event": event, "agent_id": agent_id, "at": time.time(), **extra})
+
+
 def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: dict[str, Any],
-                      exact_candidates: list[dict[str, Any]], shortlist: list[dict[str, Any]]) -> None:
+                      exact_candidates: list[dict[str, Any]], shortlist: list[dict[str, Any]], on_event=None) -> None:
     """Run all six specialist model steps; model recommendations can only tighten deterministic policy."""
     receipt = source["receipt"]
     invoices = source["invoices"]
@@ -123,6 +128,7 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
     allowed_fields = {"receipt_id", "invoice_id", "amount_minor", "currency", "reference", "remittance.reference"}
     outputs: list[dict[str, Any]] = []
 
+    _progress(on_event, "agent.started", "ledgersight.intake")
     intake = _agent_json(client, "ledgersight.intake",
         "Check whether the supplied allowlisted records have a material ambiguity or inconsistency. Flag concerns conservatively.",
         {"receipt": receipt, "invoices": invoices[:20], "remittance": source["remittance"], "input_digest": input_digest},
@@ -137,7 +143,9 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
         result["status"] = "escalated"
         result["exception"] = {"queue": "data_quality", "reason_code": "INTAKE_REVIEW_REQUIRED", "candidate_invoice_ids": []}
     outputs.append(intake)
+    _progress(on_event, "agent.completed", "ledgersight.intake", step={"agent_id": "ledgersight.intake", "status": "completed", "recommendation": intake})
 
+    _progress(on_event, "agent.started", "ledgersight.match")
     match = _agent_json(client, "ledgersight.match",
         "Rank only supplied invoice candidates. Return null if no candidate is supported. Cite only allowed field names.",
         {"receipt": receipt, "remittance": source["remittance"], "candidate_invoices": shortlist},
@@ -158,7 +166,9 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
         result["exception"] = {"queue": "controller_review", "reason_code": "MODEL_MATCH_UNCERTAIN",
                                "candidate_invoice_ids": [i["invoice_id"] for i in exact_candidates]}
     outputs.append(match)
+    _progress(on_event, "agent.completed", "ledgersight.match", step={"agent_id": "ledgersight.match", "status": "completed", "recommendation": match})
 
+    _progress(on_event, "agent.started", "ledgersight.reconciliation")
     reconciliation = _agent_json(client, "ledgersight.reconciliation",
         "Explain the comparison and name only source fields that support the explanation. Do not choose or approve an action.",
         {"classification": result["agent_trace"][2].get("classification"), "receipt": receipt,
@@ -168,7 +178,10 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
     if not isinstance(reconciliation["evidence_fields"], list) or any(field not in allowed_fields for field in reconciliation["evidence_fields"]):
         raise RuntimeErrorCode("agent_model_output_invalid", "Reconciliation cited a field outside the source allowlist")
     outputs.append(reconciliation)
+    _progress(on_event, "agent.completed", "ledgersight.reconciliation",
+              step={"agent_id": "ledgersight.reconciliation", "status": "completed", "recommendation": reconciliation})
 
+    _progress(on_event, "agent.started", "ledgersight.cash_allocation")
     cash = _agent_json(client, "ledgersight.cash_allocation",
         "Recommend prepare_proposal only when the deterministic policy allows an exact unique match. Never create or alter amounts.",
         {"policy_decision": result["policy_decision"], "proposal": result["proposal"],
@@ -187,8 +200,11 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
         result["exception"] = {"queue": "controller_review", "reason_code": "CASH_ALLOCATION_REVIEW_REQUIRED",
                                "candidate_invoice_ids": [i["invoice_id"] for i in exact_candidates]}
     outputs.append(cash)
+    _progress(on_event, "agent.completed", "ledgersight.cash_allocation",
+              step={"agent_id": "ledgersight.cash_allocation", "status": "completed", "recommendation": cash})
 
     policy = result["policy_decision"]
+    _progress(on_event, "agent.started", "ledgersight.exception")
     exception = _agent_json(client, "ledgersight.exception",
         "Route policy escalations to one permitted review queue. Return none only when policy decision is ALLOW.",
         {"decision": policy["decision"], "reason_code": policy["reason_code"],
@@ -208,7 +224,10 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
         result["exception"] = {"queue": exception["queue"], "reason_code": "EXCEPTION_AGENT_REVIEW",
                                "candidate_invoice_ids": [i["invoice_id"] for i in exact_candidates], "summary": exception["summary"]}
     outputs.append(exception)
+    _progress(on_event, "agent.completed", "ledgersight.exception",
+              step={"agent_id": "ledgersight.exception", "status": "completed", "recommendation": exception})
 
+    _progress(on_event, "agent.started", "ledgersight.audit")
     audit = _agent_json(client, "ledgersight.audit",
         "Summarize the trace and return only known evidence references. Evidence hashes are computed by the runtime, not by you.",
         {"receipt_id": receipt["receipt_id"], "input_digest": input_digest,
@@ -220,6 +239,7 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
     if not isinstance(audit["evidence_refs"], list) or any(ref not in known_ids for ref in audit["evidence_refs"]):
         raise RuntimeErrorCode("agent_model_output_invalid", "Audit referenced evidence outside this run")
     outputs.append(audit)
+    _progress(on_event, "agent.completed", "ledgersight.audit", step={"agent_id": "ledgersight.audit", "status": "completed", "recommendation": audit})
 
     for step, output in zip(result["agent_trace"], outputs):
         step["model"] = client.model_id
@@ -229,7 +249,8 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
 
 
 def run_agents(tenant_id: str, actor: str, receipt: dict[str, Any], invoices: list[dict[str, Any]],
-              remittance: dict[str, Any], client: AgentModelClient | None = None) -> dict[str, Any]:
+              remittance: dict[str, Any], client: AgentModelClient | None = None,
+              on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Run deterministic gates, then optional six-agent Bedrock reasoning."""
     if not tenant_id or not actor:
         raise RuntimeErrorCode("context_required", "Tenant and actor context are required")
@@ -264,6 +285,8 @@ def run_agents(tenant_id: str, actor: str, receipt: dict[str, Any], invoices: li
         seen.add(iid)
         valid.append(invoice)
 
+    progress = on_event if client is None else None
+    _progress(progress, "agent.started", "ledgersight.intake")
     # Build a narrow schema before hashing or sending evidence to any model.
     clean_receipt = {"receipt_id": receipt["receipt_id"], "amount_minor": amount,
                      "currency": currency.upper(), "reference": reference.strip()}
@@ -274,10 +297,15 @@ def run_agents(tenant_id: str, actor: str, receipt: dict[str, Any], invoices: li
                                       else "")}
     input_manifest = {"receipt": clean_receipt, "invoices": clean_invoices, "remittance": clean_remittance}
     input_digest = canonical_digest(input_manifest)
+    _progress(progress, "agent.completed", "ledgersight.intake", step={"agent_id": "ledgersight.intake", "status": "completed", "input_digest": input_digest})
+    _progress(progress, "agent.started", "ledgersight.match")
     remit_ref = clean_remittance["reference"] or None
     match_ref = remit_ref if isinstance(remit_ref, str) and remit_ref.strip() else reference
     candidates = [i for i in clean_invoices if i["reference"].casefold() == match_ref.casefold()
                   and i["currency"] == currency.upper() and i["amount_minor"] == amount]
+    _progress(progress, "agent.completed", "ledgersight.match",
+              step={"agent_id": "ledgersight.match", "status": "completed", "candidate_ids": [i["invoice_id"] for i in candidates]})
+    _progress(progress, "agent.started", "ledgersight.reconciliation")
     invoice: dict[str, Any] | None
     if len(candidates) == 1:
         classification, decision, reason, invoice = "exact_match", "ALLOW", "EXACT_MATCH_WITHIN_LIMIT", candidates[0]
@@ -286,6 +314,9 @@ def run_agents(tenant_id: str, actor: str, receipt: dict[str, Any], invoices: li
     else:
         classification, decision, reason, invoice = "unmatched", "ESCALATE", "NO_EXACT_MATCH", None
 
+    _progress(progress, "agent.completed", "ledgersight.reconciliation",
+              step={"agent_id": "ledgersight.reconciliation", "status": "completed", "classification": classification})
+    _progress(progress, "agent.started", "ledgersight.cash_allocation")
     approval_required = bool(invoice and amount >= HIGH_VALUE_THRESHOLD_MINOR)
     if approval_required:
         decision, reason = "ESCALATE", "HIGH_VALUE_CONTROLLER_APPROVAL_REQUIRED"
@@ -293,8 +324,14 @@ def run_agents(tenant_id: str, actor: str, receipt: dict[str, Any], invoices: li
     if invoice:
         proposal = {"action": "allocate_cash", "receipt_id": receipt["receipt_id"], "invoice_id": invoice["invoice_id"],
                     "amount_minor": amount, "currency": currency.upper(), "reference": match_ref}
+    _progress(progress, "agent.completed", "ledgersight.cash_allocation",
+              step={"agent_id": "ledgersight.cash_allocation", "status": "proposal_created" if proposal else "no_action", "proposal": proposal})
+    _progress(progress, "agent.started", "ledgersight.exception")
     exception = None if decision == "ALLOW" else {"queue": "controller_review", "reason_code": reason,
                                                    "candidate_invoice_ids": [x["invoice_id"] for x in candidates]}
+    _progress(progress, "agent.completed", "ledgersight.exception",
+              step={"agent_id": "ledgersight.exception", "status": "routed" if exception else "not_required", "exception": exception})
+    _progress(progress, "agent.started", "ledgersight.audit")
     result = {
         "tenant_id": tenant_id, "actor": actor, "workflow_id": PACK_ID, "workflow_version": PACK_VERSION,
         "policy_id": POLICY_ID, "policy_version": POLICY_VERSION, "input_digest": input_digest,
@@ -316,6 +353,7 @@ def run_agents(tenant_id: str, actor: str, receipt: dict[str, Any], invoices: li
         "prepared_action": None, "execution": None,
         "agent_mode": "deterministic", "model_id": None,
     }
+    _progress(progress, "agent.completed", "ledgersight.audit", step=result["agent_trace"][-1])
     if client is not None:
         reference_lower = match_ref.casefold()
         shortlist = sorted(clean_invoices, key=lambda item: (
@@ -324,7 +362,7 @@ def run_agents(tenant_id: str, actor: str, receipt: dict[str, Any], invoices: li
             -SequenceMatcher(None, reference_lower, item["reference"].casefold()).ratio(),
             item["invoice_id"],
         ))[:20]
-        _run_model_agents(client, result, input_manifest, candidates, shortlist)
+        _run_model_agents(client, result, input_manifest, candidates, shortlist, on_event=on_event)
     return result
 
 

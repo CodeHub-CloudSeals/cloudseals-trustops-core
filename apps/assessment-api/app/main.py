@@ -5,8 +5,10 @@ import copy
 import hashlib
 import json
 import os
+import queue
 import re
 import secrets
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -16,7 +18,7 @@ from urllib.parse import urlparse
 
 import reporting
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from question_engine import candidate_findings, eligible_questions, load_registry
@@ -84,7 +86,7 @@ async def hardening(request: Request, call_next):
     else:
         portal_csp = "default-src 'none'; frame-ancestors 'none'"
     resp.headers.setdefault("Content-Security-Policy", portal_csp)
-    if request.method not in ("GET", "HEAD", "OPTIONS") and persist.enabled():
+    if request.method not in ("GET", "HEAD", "OPTIONS") and persist.enabled() and resp.headers.get("X-Workflow-Stream") != "1":
         try:
             persist.save(STORE)
         except persist.PersistConflict as e:
@@ -1666,9 +1668,7 @@ def list_workflow_runs(limit: int = Query(default=25, ge=1, le=100), p: Principa
              "currency", "status", "policy_decision", "created_at")} for r in runs[:limit]], "total": len(runs)}
 
 
-@app.post("/v1/workflows/{pack_id}/runs", status_code=201)
-def start_workflow(pack_id: str, body: WorkflowRunRequest, p: Principal = Depends(principal),
-                   idempotency_key: Optional[str] = Header(default=None)):
+def _start_workflow(pack_id: str, body: WorkflowRunRequest, p: Principal, idempotency_key: Optional[str], on_event=None):
     if not runtime_enabled():
         raise err(503, "runtime_unavailable", "Governed execution runtime is not enabled in this environment")
     require(p, "customer_admin", "customer_architect", "customer_risk", "customer_controller", "cloudseals_assessor", "cloudseals_admin")
@@ -1683,7 +1683,7 @@ def start_workflow(pack_id: str, body: WorkflowRunRequest, p: Principal = Depend
                 raise err(409, "duplicate_receipt", "Receipt has already been submitted for this tenant")
             model_client = trustops_runtime.configured_model_client()
             run = trustops_runtime.run_agents(p.tenant_id or "", p.sub, body.receipt, body.invoices, body.remittance,
-                                              client=model_client)
+                                              client=model_client, on_event=on_event)
         except trustops_runtime.RuntimeErrorCode as e:
             status = 503 if e.code == "agent_model_unavailable" else 502 if e.code == "agent_model_output_invalid" else 422
             raise err(status, e.code, str(e)) from e
@@ -1697,6 +1697,69 @@ def start_workflow(pack_id: str, body: WorkflowRunRequest, p: Principal = Depend
         audit(p, "trustops.workflow.start", run_id)
         return run
     return idempotent(p, idempotency_key, f"workflow:{pack_id}", do)
+
+
+@app.post("/v1/workflows/{pack_id}/runs", status_code=201)
+def start_workflow(pack_id: str, body: WorkflowRunRequest, p: Principal = Depends(principal),
+                   idempotency_key: Optional[str] = Header(default=None)):
+    return _start_workflow(pack_id, body, p, idempotency_key)
+
+
+_STREAM_SLOTS = threading.BoundedSemaphore(4)
+
+
+@app.post("/v1/workflows/{pack_id}/runs/stream", response_class=StreamingResponse,
+          responses={200: {"content": {"text/event-stream": {}}}})
+def stream_workflow(pack_id: str, body: WorkflowRunRequest, p: Principal = Depends(principal),
+                    idempotency_key: Optional[str] = Header(default=None)):
+    """Authenticated POST stream. Workers publish events at actual execution boundaries."""
+    if not runtime_enabled():
+        raise err(503, "runtime_unavailable", "Governed execution runtime is not enabled in this environment")
+    require(p, "customer_admin", "customer_architect", "customer_risk", "customer_controller", "cloudseals_assessor", "cloudseals_admin")
+    if pack_id != trustops_runtime.PACK_ID:
+        raise err(404, "workflow_pack_not_found", "Workflow pack not found")
+    if not idempotency_key or len(idempotency_key) > 128:
+        raise err(400, "idempotency_key_required", "Idempotency-Key header required (max 128 chars)")
+    if not _STREAM_SLOTS.acquire(blocking=False):
+        raise err(429, "workflow_capacity", "Workflow capacity reached; try again shortly")
+    events = queue.Queue(maxsize=64)
+
+    def worker():
+        try:
+            run = _start_workflow(pack_id, body, p, idempotency_key, on_event=events.put_nowait)
+            # The normal middleware must not block streaming until this worker ends.
+            # Save here before announcing that the final result is available.
+            if persist.enabled():
+                with STORE.lock:
+                    persist.save(STORE)
+            events.put_nowait({"event": "run.completed", "at": time.time(), "run": run})
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            events.put_nowait({"event": "run.failed", "at": time.time(), "error": detail})
+        except Exception:
+            events.put_nowait({"event": "run.failed", "at": time.time(), "error": {"code": "workflow_failed",
+                                  "message": "Workflow could not be completed. No action was executed."}})
+        finally:
+            _STREAM_SLOTS.release()
+
+    def generate():
+        while True:
+            try:
+                event = events.get(timeout=10)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+            yield "data: " + json.dumps(event, default=str) + "\n\n"
+            if event["event"] in ("run.completed", "run.failed"):
+                break
+
+    try:
+        threading.Thread(target=worker, daemon=True, name="trustops-workflow").start()
+    except RuntimeError as exc:
+        _STREAM_SLOTS.release()
+        raise err(503, "workflow_unavailable", "Workflow could not be started") from exc
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                             headers={"X-Workflow-Stream": "1", "X-Accel-Buffering": "no", "Cache-Control": "no-store"})
 
 
 @app.get("/v1/runs/{run_id}")

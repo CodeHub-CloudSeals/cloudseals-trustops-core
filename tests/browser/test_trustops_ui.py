@@ -55,12 +55,16 @@ def test_high_value_run_needs_a_different_person_to_approve(as_user, api):
 
 def test_payment_agent_flow_animates_all_seven_agents_in_order(as_user):
     page = as_user("admin@t-bank", "agent-flow")
-    page.get_by_role("button", name="▶ Run agents").click()
-    expect(page.locator(".af-agent.is-running")).to_have_count(1)                      # exactly one agent works at a time
-    expect(page.locator(".af-thinking")).to_be_visible()
+    with page.expect_response(lambda r: r.url.endswith("/runs/stream") and r.request.method == "POST") as stream:
+        page.get_by_role("button", name="▶ Run agents").click()
+    assert stream.value.status == 200
+    assert "text/event-stream" in stream.value.headers["content-type"]
+    # Fast workers can finish before the first paint: do not require invented busy time.
+    expect(page.locator("main")).not_to_contain_text("NO AGENTS EXECUTED")
     expect(page.locator(".af-result")).to_be_visible(timeout=60_000)
     expect(page.locator(".af-node.is-done")).to_have_count(7)
     expect(page.locator(".af-agent.is-done")).to_have_count(7)
+    expect(page.locator(".office-seat.is-done")).to_have_count(7)
     assert page.evaluate("document.querySelector('.af-progress-bar').style.width") == "100%"
     assert page.errors == []
 

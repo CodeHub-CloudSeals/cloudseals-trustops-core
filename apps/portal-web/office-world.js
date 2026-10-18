@@ -6,7 +6,7 @@ export function createOfficeWorld(el, onSelect) {
   const root = el("div", { class: "office-world" }, canvas, caption, seats);
   const ctx = canvas.getContext("2d");
   const motion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  let data = { nodes: [], current: -1, running: false, preview: false, selected: 0 };
+  let data = { nodes: [], current: -1, running: false, selected: 0 };
   let frame = null, lastFrame = 0, zoom = 1, width = 1000, height = 680, hitAreas = [], lastStep = -1, handoffAt = -10000;
   const W = 1000, H = 680;
   const shirts = ["#335bc0", "#3a8f91", "#8a74b0", "#c38359", "#547b98", "#38877d", "#6574b5", "#a67c98", "#5b8294"];
@@ -80,12 +80,11 @@ export function createOfficeWorld(el, onSelect) {
     box(8.5,10,2.2,.8,0,34,"#eee6db","#bba995","#d6c6b3");
     const review=iso(9.6,10.7,-20);rounded(review.x-62,review.y,124,22,7,"#ffffffed");label("HUMAN REVIEW",review.x,review.y+14,"#526b8b",9,true);
     person(9.4,10.9,5,time);
-    const previewIndex=Math.floor(time/2900)%Math.max(1,data.nodes.length);
-    const objects=data.nodes.map((n,i)=>({depth:seatPos(i).x+seatPos(i).y+.8,draw:()=>desk(n,i,time,data.preview?i===previewIndex:n.state==="running")}));
+    const objects=data.nodes.map((n,i)=>({depth:seatPos(i).x+seatPos(i).y+.8,draw:()=>desk(n,i,time,n.state==="running")}));
     // A file courier illustrates a handoff; it is not another executing AI agent.
-    const pathIndex=data.preview?previewIndex:Math.max(0,data.current),previous=Math.max(0,pathIndex-1);
-    const handoffProgress=data.preview?(time%2900)/2900:Math.min(1,(time-handoffAt)/2200);
-    if((data.preview||time-handoffAt<2200)&&pathIndex>0){
+    const pathIndex=Math.max(0,data.current),previous=Math.max(0,pathIndex-1);
+    const handoffProgress=Math.min(1,(time-handoffAt)/2200);
+    if((time-handoffAt<2200)&&pathIndex>0){
       const a=seatPos(previous),b=seatPos(pathIndex);const t=Math.max(0,handoffProgress);
       const x=a.x+1.9+(b.x-a.x)*t,y=a.y+2+(b.y-a.y)*t;
       objects.push({depth:x+y,draw:()=>person(x,y,8,time,{walking:true,carry:true})});
@@ -94,7 +93,7 @@ export function createOfficeWorld(el, onSelect) {
     const walk=(Math.sin(time*.00024)+1)/2,px=3+walk*4.8,py=9.9;
     objects.push({depth:px+py,draw:()=>person(px,py,3,time,{walking:true,carry:false})});
     objects.sort((a,b)=>a.depth-b.depth).forEach(o=>o.draw());
-    const captionPoint=iso(6.2,11.6,-35);label(data.preview?"ANIMATION PREVIEW · NO AGENTS EXECUTED":"WORKFLOW STATES DRIVE THE DESKS · OFFICE MOTION IS DECORATIVE",captionPoint.x,captionPoint.y,"#6c819b",8,true);
+    const captionPoint=iso(6.2,11.6,-35);label("WORKFLOW EVENTS → AGENT RESULTS → POLICY → HUMAN REVIEW",captionPoint.x,captionPoint.y,"#6c819b",8,true);
   }
   function draw(time) {
     if(!ctx)return;
@@ -125,7 +124,7 @@ export function createOfficeWorld(el, onSelect) {
     update(next){
       if(next.current!==lastStep){handoffAt=performance.now();lastStep=next.current;}
       data=next;
-      caption.textContent=next.preview?"Animation preview: fictional office activity only. No backend calls or approvals are made.":"Click a desk to inspect its actual status and output. Walking, breathing and room lighting are decorative.";
+      caption.textContent="Select a desk to see its task and returned result. Run workflow to start a new execution.";
       seats.replaceChildren(...next.nodes.map((n,i)=>el("button",{type:"button",class:`office-seat is-${n.state}`,"aria-pressed":String(next.selected===i),onclick:()=>onSelect(i)},el("i",{}),n.name,el("small",{},n.state))));
       kick();
     }

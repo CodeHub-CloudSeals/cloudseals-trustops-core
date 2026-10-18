@@ -250,7 +250,7 @@ routes.demo = async () => {
     el("div", { class: "demo-section-heading" }, el("h3", {}, "Four moments that explain TrustOps"), el("span", { class: "help" }, "Suggested walkthrough · 8–10 minutes")),
     el("div", { class: "demo-story-grid" },
       step("01", "Understand your AI", "Assess a fictional legacy AI payment process using its inventory, policies and questionnaire answers. Review gaps and download the prepared report; the governed payment workflow shows the target controls.", report ? "PREPARED QUESTIONNAIRE REPORT" : "ASSESSMENT", sample ? open("View assessment & findings", "admin@t-bank", `#/assessment/${sample.assessment_id}`) : el("p", { class: "help" }, "Demo dataset needs preparation."), reportButtons),
-      step("02", "Meet the specialist team", "Watch the agent office and inspect each desk's task and returned output. Payment results replay the completed server trace.", "INTERACTIVE AGENT OFFICE", open("Run the agent office", "admin@t-bank", "#/agent-flow")),
+      step("02", "Meet the specialist team", "Start a workflow in the agent office and inspect each desk's task, returned output and live execution events.", "INTERACTIVE AGENT OFFICE", open("Run the agent office", "admin@t-bank", "#/agent-flow")),
       step("03", "Keep people in control", "An exact match can proceed within policy. High-value actions need a controller; ambiguous matches are escalated.", approval ? runStatusLabel(approval.status).toUpperCase() : "HUMAN OVERSIGHT", approval ? open("Review high-value scenario", "controller@t-bank", `#/trustops/${approval.run_id}`) : "", open("Open controller approval queue", "controller@t-bank", "#/approvals", true)),
       step("04", "Verify the proof", "Inspect the policy, proposal and mock execution receipt. Verify the stored hash chain against the current evidence records.", completed ? "EXECUTED IN MOCK ERP" : "EVIDENCE FABRIC", completed ? open("Inspect completed run", "admin@t-bank", `#/trustops/${completed.run_id}`) : "", completed ? el("button", { type: "button", class: "secondary", onclick: safe(async () => {
         const result = await api(`/v1/evidence/${completed.run_id}/verify`, { method: "POST" });
@@ -1241,7 +1241,6 @@ routes["service-health"] = async () => {
 
 
 // ---------- Agent Flow: watch the agents run, step by step ----------
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const FLOW_NODES = {
   payment: [["ledgersight.intake", "Intake", "Checks the payment data and fingerprints it"],
     ["ledgersight.match", "Match", "Finds candidate invoices for the payment"],
@@ -1281,24 +1280,7 @@ function describeStep(step) {
 
 // CSP forbids inline style attributes; setting the width through the CSSOM is allowed.
 function progressFill(pct) { const f = el("div", { class: "af-progress-bar", role: "presentation" }); f.style.width = `${pct}%`; return f; }
-const CAPTIONS = {
-  "ledgersight.intake": ["Reading the receipt…", "Checking amount and currency…", "Fingerprinting the input…"],
-  "ledgersight.match": ["Scanning candidate invoices…", "Comparing reference, amount and currency…", "Shortlisting matches…"],
-  "ledgersight.reconciliation": ["Comparing the normalised values…", "Explaining any differences…"],
-  "ledgersight.cash_allocation": ["Checking the policy gate…", "Preparing a bounded proposal…"],
-  "ledgersight.exception": ["Checking whether a human is needed…", "Choosing the review queue…"],
-  "ledgersight.audit": ["Collecting evidence references…", "Hashing the evidence record…"],
-  "trustops.approval_summarizer": ["Reading the policy decision…", "Writing the approver summary…"],
-  "cloudseals.swaska.diagnostic_interviewer": ["Reading the question…", "Drafting one clarifying question…"],
-  "cloudseals.swaska.evidence_extractor": ["Reading the evidence file…", "Looking for answer candidates…", "Quoting the source lines…"],
-  "cloudseals.swaska.findings_summarizer": ["Reading candidate findings…", "Writing reviewer summaries…"],
-  "trustops.inventory_agent": ["Reading the documents…", "Listing AI use cases…", "Checking every quote against the text…"],
-  "trustops.gap_analysis_agent": ["Reading validated use cases…", "Comparing with framework requirements…", "Citing requirement IDs…"],
-  "trustops.maturity_scorer": ["Reading validated use cases and gaps…", "Scoring five principles…", "Checking every score has evidence…"],
-  "trustops.roadmap_agent": ["Reading validated gaps…", "Ordering by severity and dependency…", "Estimating effort and owners…"],
-  "trustops.architecture_overlay": ["Reading validated use cases…", "Drawing only what is evidenced…", "Laying out the target architecture…"],
-  "cloudseals.swaska.poc_drafter": ["Reading the draft blueprint…", "Writing scope notes…"],
-};
+
 
 routes["agent-flow"] = async () => {
   const roles = state.me.roles;
@@ -1310,7 +1292,7 @@ routes["agent-flow"] = async () => {
   const note = el("p", { class: "module-note" });
   const stage = el("div", { class: "af-stage", "aria-hidden": "true" }), bubble = el("div", { class: "af-bubble", "aria-live": "polite" });
   const list = el("ol", { class: "af-list" }), banner = el("div", { class: "af-banner" }), controls = el("div", { class: "af-controls" });
-  const office = createAgentOffice(el);
+  const office = createAgentOffice(el, { onRun: () => runBtn.click() });
   const officeToggle = el("button", { type: "button", class: "secondary", "aria-expanded": "true", onclick: (e) => {
     office.element.hidden = !office.element.hidden;
     e.currentTarget.setAttribute("aria-expanded", String(!office.element.hidden));
@@ -1321,7 +1303,7 @@ routes["agent-flow"] = async () => {
     office.update({ nodes, flow, current, running });
     const done = nodes.filter((n) => ["done", "skipped", "failed"].includes(n.state)).length;
     note.textContent = flow === "payment"
-      ? "Sandbox only: nothing is written to a real ERP. The workflow runs once on the server; each agent's real output is then shown in turn, and the activity text describes what that agent does."
+      ? "Each step below is driven by an execution event from the workflow service. Select a desk to inspect the returned result. External ERP posting is not enabled in this workspace."
       : "Each agent is a separate real call. Agents you cannot use, or that have nothing to work on yet, are marked Skipped with the reason. Output is advisory and never saved as an answer.";
     banner.replaceChildren(el("div", { class: "af-progress" }, progressFill(Math.round(done / nodes.length * 100))),
       el("span", {}, running ? `Running… ${done} of ${nodes.length} agents finished` : done ? `${done} of ${nodes.length} agents finished` : "Choose a flow and press Run"), summary || "");
@@ -1342,35 +1324,61 @@ routes["agent-flow"] = async () => {
   };
   const set = (i, patch) => { Object.assign(nodes[i], patch); draw(); };
   const skip = (i, why) => { current = i; set(i, { state: "skipped", lines: [why] }); };
-  // One agent "works": status + rotating activity captions while the task runs, then its real output appears.
-  async function act(i, task, { real = true, minMs = 1700 } = {}) {
-    current = i; const caps = CAPTIONS[nodes[i].id] || ["Working…"]; let c = 0;
-    set(i, { state: "running", lines: [], caption: caps[0] });
-    const tick = setInterval(() => { c = (c + 1) % caps.length; set(i, { caption: caps[c] }); }, Math.max(500, minMs / caps.length));
+  // Status follows the pending request, with no artificial work timers.
+  async function act(i, task) {
+    current = i;
+    set(i, { state: "running", lines: [], caption: "Request in progress…" });
     const t = performance.now();
-    try {
-      const [res] = await Promise.all([task(), sleep(minMs)]);
-      set(i, { ms: real ? Math.round(performance.now() - t - 0) : null, ...res });
-    } catch (e) {
-      set(i, { state: e.status === 403 ? "skipped" : "failed", lines: [e.status === 403 ? "Your role does not have access to this agent." : e.message] });
-    } finally { clearInterval(tick); }
-    await sleep(700); // the result travels to the next agent
+    try { const res = await task(); set(i, { ms: Math.round(performance.now() - t), ...res }); }
+    catch (e) { set(i, { state: e.status === 403 ? "skipped" : "failed", lines: [e.status === 403 ? "Your role does not have access to this agent." : e.message] }); }
   }
 
   async function runPayment() {
-    let run, reqErr;
-    const req = api("/v1/workflows/ledgersight.ar_cash/runs", { method: "POST", idem: true, body: paymentBody(preset) }).then((r) => { run = r; }, (e) => { reqErr = e; });
-    for (let i = 0; i < 6; i++) {
-      await act(i, async () => { await req; if (reqErr) throw reqErr; const step = run.agent_trace[i]; return { state: step.status === "failed" ? "failed" : "done", lines: describeStep(step) }; }, { real: false });
-      if (reqErr) { nodes.slice(i + 1).forEach((_, k) => skip(i + 1 + k, "Not started because the workflow failed.")); return; }
-    }
-    await act(6, async () => {
-      const r = await api(`/v1/runs/${run.run_id}/approval-summary`);
-      return { state: "done", lines: [r.summary, r.decision_reason, `Mode: ${r.mode}`] };
-    });
-    const pd = run.policy_decision;
-    summary = el("div", { class: "af-result" }, el("strong", {}, `Policy decision: ${pd.decision}`), ` · ${pd.reason_code.replaceAll("_", " ").toLowerCase()} · `,
-      el("a", { href: `#/trustops/${run.run_id}` }, "Open full run →"));
+    const response = await api("/v1/workflows/ledgersight.ar_cash/runs/stream", { method: "POST", idem: true, raw: true, body: paymentBody(preset) });
+    if (!response.ok) throw new Error((await response.json()).message || "Workflow could not be started");
+    const reader = response.body.getReader(), decoder = new TextDecoder(), starts = new Map();
+    let buffer = "", run = null;
+    const receive = event => {
+      if (event.event === "run.failed") throw new Error(event.error?.message || "Workflow did not complete");
+      if (event.event === "run.completed") { run = event.run; return; }
+      const i = nodes.findIndex(n => n.id === event.agent_id);
+      if (i < 0) return;
+      current = i;
+      if (event.event === "agent.started") {
+        starts.set(i, event.at);
+        set(i, { state: "running", lines: [], caption: "Executing workflow step…" });
+      } else if (event.event === "agent.completed") {
+        set(i, { state: "done", lines: describeStep(event.step), ms: Math.max(0, Math.round((event.at - (starts.get(i) ?? event.at)) * 1000)) });
+      }
+    };
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        let split;
+        while ((split = buffer.indexOf("\n\n")) !== -1) {
+          const packet = buffer.slice(0, split); buffer = buffer.slice(split + 2);
+          const json = packet.split("\n").find(line => line.startsWith("data: "));
+          if (json) receive(JSON.parse(json.slice(6)));
+        }
+        if (done) break;
+      }
+      if (!run) throw new Error("Workflow connection ended before the result was received");
+      // A replay of an idempotent request may contain only its final saved result.
+      run.agent_trace.forEach((step, i) => set(i, { state: "done", lines: describeStep(step) }));
+      await act(6, async () => {
+        const result = await api(`/v1/runs/${run.run_id}/approval-summary`);
+        return { state: "done", lines: [result.summary, result.decision_reason] };
+      });
+      const pd = run.policy_decision;
+      summary = el("div", { class: "af-result" }, el("strong", {}, `Policy decision: ${pd.decision}`), ` · ${pd.reason_code.replaceAll("_", " ").toLowerCase()} · `,
+        el("a", { href: `#/trustops/${run.run_id}` }, "Open full run →"));
+    } catch (error) {
+      const failed = nodes.findIndex(n => n.state === "running");
+      set(failed >= 0 ? failed : 0, { state: "failed", lines: [error.message] });
+      nodes.forEach((n, i) => { if (n.state === "waiting") skip(i, "Not executed because the workflow stopped."); });
+      throw error;
+    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
   }
 
   async function runDiagnosis() {
@@ -1393,7 +1401,7 @@ routes["agent-flow"] = async () => {
       const r = await api(`/v1/assessments/${assessmentId}/inventory/run`, { method: "POST", body: {} });
       if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
       return { state: "done", lines: r.items.length ? r.items.map((u) => `${u.name} · ${TIER_LABEL[u.risk_tier]} · ${Math.round(u.extraction_confidence * 100)}% confidence (needs review)`) : ["No AI use cases were evidenced in the documents."] };
-    }, { minMs: 2200 });
+    });
     if (!staffReview) skip(3, "Needs a CloudSeals reviewer. Customers do not see findings before review.");
     else await act(3, async () => {
       const r = await api(`/v1/assessments/${assessmentId}/agents/findings-summary`, { method: "POST" });
@@ -1407,7 +1415,7 @@ routes["agent-flow"] = async () => {
         const r = await api(`/v1/assessments/${assessmentId}/gap-analysis/run`, { method: "POST", body: { framework_id: "eu_ai_act" } });
         if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
         return { state: "done", lines: r.items.length ? r.items.slice(0, 5).map((g) => `${g.severity.toUpperCase()} · ${g.framework_clause.replaceAll("_", " ")}: ${g.title}`) : ["No gaps were raised against the EU AI Act."] };
-      }, { minMs: 2200 });
+      });
     }
     const inv = staffReview ? await api(`/v1/assessments/${assessmentId}/inventory`) : null;
     if (!staffReview) skip(5, "Needs a CloudSeals reviewer to validate use cases first.");
@@ -1416,21 +1424,21 @@ routes["agent-flow"] = async () => {
       const r = await api(`/v1/assessments/${assessmentId}/maturity/run`, { method: "POST" });
       if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
       return r.maturity ? { state: "done", lines: [`Overall ${r.maturity.overall_score} / 5 (needs review)`, ...Object.entries(r.maturity.scores).map(([p, sc]) => `${PRINCIPLE_LABEL[p]}: ${sc}`)] } : { state: "skipped", lines: [r.note] };
-    }, { minMs: 2200 });
+    });
     if (!staffReview) skip(6, "Needs a CloudSeals reviewer to validate gaps first.");
     else if (!inv.gaps.some((g) => g.status === "VALIDATED") && inv.maturity?.status !== "VALIDATED") skip(6, "Validate a gap or the maturity score first.");
     else await act(6, async () => {
       const r = await api(`/v1/assessments/${assessmentId}/roadmap/run`, { method: "POST" });
       if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
       return { state: "done", lines: r.items.length ? [`${r.summary.total_items} items, about ${r.summary.total_effort_days} person-days`, ...r.items.slice(0, 4).map((i) => `${i.timeline_band} days: ${i.title}`)] : ["No usable roadmap items were returned."] };
-    }, { minMs: 2200 });
+    });
     if (!staffReview) skip(7, "Needs a CloudSeals reviewer to validate use cases first.");
     else if (!inv.use_cases.some((u) => u.status === "VALIDATED")) skip(7, "No validated use cases yet.");
     else await act(7, async () => {
       const r = await api(`/v1/assessments/${assessmentId}/overlay/run`, { method: "POST" });
       if (r.mode === "unavailable") return { state: "skipped", lines: [r.note] };
       return r.overlay ? { state: "done", lines: [`${r.overlay.current.nodes.length} nodes today, ${r.overlay.target.nodes.length} in the target (needs review)`, ...r.overlay.key_differences.slice(0, 3)] } : { state: "skipped", lines: [r.note] };
-    }, { minMs: 2200 });
+    });
     if (!roles.some((r) => ["cloudseals_admin", "cloudseals_assessor"].includes(r))) skip(8, "Needs a CloudSeals assessor, after a reviewer has approved the report.");
     else {
       const bp = (await api(`/v1/assessments/${assessmentId}/poc-blueprints`)).items[0];
@@ -1464,8 +1472,7 @@ routes["agent-flow"] = async () => {
   }
   drawControls(); draw();
   main.replaceChildren(moduleFrame("AGENTS · OFFICE VIEW", "AI Agents Office", "Meet your specialist team. Select a desk to inspect its task, status and returned output. Use Run agents to start the selected workflow.",
-    state.cfg.assessment_model === "unavailable" ? el("p", { class: "assessment-model-notice" }, "Document AI is not connected in this environment. Payment sandbox rules can run; document analysis agents will show unavailable or skipped. No sample analysis is substituted for customer results.")
-      : state.cfg.assessment_model === "demo" ? el("p", { class: "assessment-model-notice" }, "SCRIPTED DEMO MODEL · Outputs in this environment are test examples, not real customer analysis.") : "",
+
     el("section", { class: "module-panel af-panel" }, controls, banner, officeToggle, office.element,
       el("details", { class: "office-trace", open: true }, el("summary", {}, "Step-by-step activity"), el("div", { class: "af-sticky" }, stage, bubble), list),
       note)));
