@@ -238,11 +238,11 @@ There is deliberately **no "break-glass"** override of maker-checker: staff cann
 * [PROJECT_COMPLETION_STATUS.md](PROJECT_COMPLETION_STATUS.md): what is done, what is open.
 * [ENGINEERING_README.md](ENGINEERING_README.md), [TAAD_END_GOAL.md](TAAD_END_GOAL.md): original TAAD design handoff.
 
-### AI Agents Office
+### Workflow walkthrough
 
-Open `/portal/#/agent-flow` for the office view. Select an agent desk to inspect its task, state, returned output and skipped/failed reason. The existing workflow and role checks remain authoritative; the view cannot approve findings or execute external writes. It also keeps the step-by-step trace available.
+Open `/portal/#/agent-flow` for a simple worker list: responsibility, actual execution status and returned result. The page explains the inputs, decision and evidence, and includes a short demo guide. There is no animated office scene.
 
-Diagnosis desks follow separate API requests. The payment office consumes authenticated POST server-sent events from `/v1/workflows/{pack_id}/runs/stream`; step status follows the actual worker boundaries. The illustration animates pending/selected steps and does not reveal model reasoning. Document analysis requires a configured model; unavailable and scripted-demo environments are labelled. Reduced-motion preferences disable office animation.
+Payment steps consume authenticated POST server-sent events from `/v1/workflows/{pack_id}/runs/stream`. Six workflow workers and an approval-summary helper report their actual results; configured deterministic mode is identified in the page. Diagnosis steps make separate API requests and require a configured model for document analysis. Existing role, approval and external-action checks remain authoritative.
 
 The customer assessment also includes sample document downloads, a separate sample-assessment action, and an explicitly synthetic report preview. Published customer diagnostics appear in the assessment report section after reviewer publication. `/portal/design-options.html` contains the four design previews.
 
@@ -252,4 +252,8 @@ On a seeded local server, run `../work/verify-env/bin/python scripts/prepare_cli
 
 No model is stubbed or silently substituted. A disconnected document model is labelled unavailable. The prepared questionnaire report does not prove automatic document analysis; real document-generated diagnostics require a working model and reviewer publication. Demo ERP actions use `mock_sap`, and local evidence is a hash chain without production KMS signatures.
 
-The office also has a native canvas isometric room with seated workers, typing monitors, a walking teammate, decorative file couriers, plants and furniture. **Focus office** expands the room for presentations; desk clicks and accessible agent buttons select the actual output panel. **Run workflow** starts an actual backend execution from inside the office; there is no separate fictional agent preview. Room movement is cosmetic; step status and returned results come from the execution stream. Reduced-motion preferences render a static room. No remote assets or graphics library are required.
+### Customer workspace design
+
+The portal uses a CloudSeals sidebar with Overview, Assessments, Agent workflow, Workflow runs, Reports & results and Approvals. The overview prioritises the customer journey and actual API counts. `/portal/#/reports` lists published questionnaire reports with PDF/Word downloads and a searchable workflow-results tab; unfinished assessments remain available through the assessment list. Workflow detail leads with the selected result, while the composer, agent reference and pack catalogue are expandable. Worker outputs can be expanded without showing an animated office. Selecting a new scenario clears the previous result and shows the exact input used by the next execution.
+
+No model connection, report publication, permission or ERP capability is added by this presentation change.

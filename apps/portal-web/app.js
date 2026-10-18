@@ -1,5 +1,4 @@
 // TAAD portal: dependency-free ES module. All dynamic text goes through textContent (no innerHTML).
-import { createAgentOffice } from "./agent-office.js";
 const $ = (s, r = document) => r.querySelector(s);
 const main = $("#main"), nav = $("#nav"), who = $("#who"), contextBar = $("#contextBar");
 const state = { token: sessionStorage.getItem("taad_token"), me: null, cfg: { mode: "oidc", oidc: {} } };
@@ -96,6 +95,7 @@ function logout() {
 }
 
 async function loginView() {
+  document.body.classList.remove("workspace-ready");
   nav.replaceChildren(); who.textContent = "";
   if (state.cfg.mode === "dev") {
     const users = await fetch("/v1/dev/users").then((r) => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] }));
@@ -160,12 +160,15 @@ async function render() {
     return loginView();
   }
   if (!state.me) { try { state.me = await api("/v1/me"); } catch { return logout(); } }
+  document.body.classList.add("workspace-ready");
   const staff = state.me.is_staff;
   const roles = state.me.roles;
   const hasAnyRole = (...allowed) => roles.some((role) => allowed.includes(role));
   const canUseAdminMetrics = hasAnyRole("cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor");
   const [, name, arg] = (location.hash || (canUseAdminMetrics ? "#/admin" : "#/dashboard")).split("/");
-  const link = ([route, label]) => el("a", { href: `#/${route}`, class: "module-menu-link", "aria-current": name === route ? "page" : null }, label);
+  const navIcons = { dashboard: "◫", assessments: "▤", "use-cases": "◇", trustops: "⇄", "agent-flow": "◎", reports: "▥", approvals: "✓", demo: "▷", queue: "▣" };
+  const activeRoute = name === "assessment" ? "assessments" : name;
+  const link = ([route, label]) => el("a", { href: `#/${route}`, class: "module-menu-link", "aria-current": activeRoute === route ? "page" : null }, el("span", { class: "nav-icon", "aria-hidden": "true" }, navIcons[route] || "·"), label);
   const group = (label, items) => el("details", { class: "module-menu-group" }, el("summary", {}, label, el("span", { "aria-hidden": "true" }, "⌄")),
     el("div", { class: "module-menu-popover" }, items.map(link)));
   const adminItems = [
@@ -179,8 +182,11 @@ async function render() {
     ...(hasAnyRole("cloudseals_admin") ? [["tenant-settings", "Tenant settings"]] : []),
   ];
   nav.replaceChildren(
+    el("span", { class: "nav-section-label" }, "WORKSPACE"),
+    link(["dashboard", "Overview"]), link(["assessments", "Assessments"]), link(["agent-flow", "Agent workflow"]), link(["trustops", "Workflow runs"]), link(["reports", "Reports & results"]), link(["approvals", "Approvals"]),
+    el("span", { class: "nav-section-label" }, "EXPLORE"),
+    link(["use-cases", "AI use cases"]), ...(canUseAdminMetrics ? [link(["cases", "Cases"])] : []),
     ...(state.cfg.mode === "dev" ? [link(["demo", "Demo Studio"])] : []),
-    link(["dashboard", "Command Center"]), link(["assessments", "Diagnosis"]), ...(canUseAdminMetrics ? [link(["cases", "Cases"])] : []), link(["use-cases", "Use cases"]), link(["trustops", "TrustOps"]), link(["agent-flow", "Agent Flow"]),
     canUseAdminMetrics ? link(["queue", "Review queue"]) : "",
     group("Operations", [["reconciliation", "Reconciliation"], ["exceptions", "Exceptions"], ["approvals", "Approvals"],
       ["frameworks", "Frameworks"], ["evidence", "Evidence"], ["readiness", "Readiness"], ["shadow-roi", "Shadow ROI"], ...(staff ? [] : [["team", "Team"]])]),
@@ -189,11 +195,8 @@ async function render() {
     ? el("span", { class: "tag" }, state.me.tenant ? `${tenantLabel(state.me.tenant)} workspace` : "CloudSeals staff")
     : `${state.me.sub} `, state.cfg.mode === "dev" ? "" : el("button", { class: "secondary", onclick: logout }, "Sign out"));
   contextBar.replaceChildren(
-    el("span", {}, el("small", {}, "TENANT"), state.me.tenant ? tenantLabel(state.me.tenant) : staff ? "CloudSeals operations" : "Customer workspace"),
-    state.cfg.mode === "dev" ? "" : el("span", {}, el("small", {}, "ENVIRONMENT"), "OIDC session"),
-    el("span", {}, el("small", {}, "ROLE"), state.me.roles.join(" · ")),
-    el("span", {}, el("small", {}, "QUESTION CATALOG"), "v1.0.0 · 318 questions"),
-    el("span", {}, el("small", {}, "EVIDENCE INTEGRITY"), state.cfg.mode === "dev" ? "Local hash chain" : "Environment profile"));
+    el("div", { class: "workspace-breadcrumb" }, el("span", {}, "Workspace"), el("span", { "aria-hidden": "true" }, "/"), el("strong", {}, ({dashboard:"Overview",assessments:"Assessments",assessment:"Assessment", "agent-flow":"Agent workflow",trustops:"Workflow runs",reports:"Reports & results",demo:"Demo Studio"})[name] || name.replaceAll("-", " "))),
+    el("div", { class: "workspace-context-actions" }, el("span", { class: "workspace-session" }, state.cfg.mode === "dev" ? "Local workspace" : "Secure session"), el("span", { class: "workspace-avatar", "aria-hidden": "true" }, tenantLabel(state.me.tenant).slice(0,1))));
   contextBar.scrollLeft = 0;
   // Pages that only CloudSeals staff (or specific staff roles) may use: show a clear message instead of an empty shell.
   const CASE_ROLES = ["cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer"], AUDIT = ["cloudseals_admin", "cloudseals_platform_ops", "auditor_readonly"];
@@ -242,7 +245,7 @@ routes.demo = async () => {
   main.replaceChildren(el("div", { class: "module-page demo-studio" },
     el("section", { class: "demo-hero" }, el("div", {}, el("span", { class: "eyebrow" }, "CLOUDSEALS TRUSTOPS · CLIENT DEMONSTRATION"), el("h2", {}, "AI you can operate with confidence."),
       el("p", {}, "Understand the risk. Control the action. Keep the proof."),
-      el("div", { class: "row" }, open("Explore the agent office →", "admin@t-bank", "#/agent-flow"), sample ? open("Open sample assessment", "admin@t-bank", `#/assessment/${sample.assessment_id}`, true) : "")),
+      el("div", { class: "row" }, open("See how the workflow runs →", "admin@t-bank", "#/agent-flow"), sample ? open("Open sample assessment", "admin@t-bank", `#/assessment/${sample.assessment_id}`, true) : "")),
       el("div", { class: "demo-hero-seal" }, el("span", { "aria-hidden": "true" }, "◇"), el("strong", {}, "Governed by design"), el("small", {}, "Policy · Human oversight · Evidence"))),
     el("p", { class: "demo-disclosure" }, "SYNTHETIC CLIENT DEMO · Real application APIs and policy checks, fictional data, mock ERP connector. Prepared sample approvals are demonstration fixtures, not customer sign-offs."),
     el("section", { class: "demo-readiness", "aria-label": "Live demo readiness" },
@@ -250,7 +253,7 @@ routes.demo = async () => {
     el("div", { class: "demo-section-heading" }, el("h3", {}, "Four moments that explain TrustOps"), el("span", { class: "help" }, "Suggested walkthrough · 8–10 minutes")),
     el("div", { class: "demo-story-grid" },
       step("01", "Understand your AI", "Assess a fictional legacy AI payment process using its inventory, policies and questionnaire answers. Review gaps and download the prepared report; the governed payment workflow shows the target controls.", report ? "PREPARED QUESTIONNAIRE REPORT" : "ASSESSMENT", sample ? open("View assessment & findings", "admin@t-bank", `#/assessment/${sample.assessment_id}`) : el("p", { class: "help" }, "Demo dataset needs preparation."), reportButtons),
-      step("02", "Meet the specialist team", "Start a workflow in the agent office and inspect each desk's task, returned output and live execution events.", "INTERACTIVE AGENT OFFICE", open("Run the agent office", "admin@t-bank", "#/agent-flow")),
+      step("02", "Meet the specialist team", "Start a workflow and inspect each worker's responsibility, status and returned result.", "ACTUAL WORKFLOW EXECUTION", open("Run the workflow", "admin@t-bank", "#/agent-flow")),
       step("03", "Keep people in control", "An exact match can proceed within policy. High-value actions need a controller; ambiguous matches are escalated.", approval ? runStatusLabel(approval.status).toUpperCase() : "HUMAN OVERSIGHT", approval ? open("Review high-value scenario", "controller@t-bank", `#/trustops/${approval.run_id}`) : "", open("Open controller approval queue", "controller@t-bank", "#/approvals", true)),
       step("04", "Verify the proof", "Inspect the policy, proposal and mock execution receipt. Verify the stored hash chain against the current evidence records.", completed ? "EXECUTED IN MOCK ERP" : "EVIDENCE FABRIC", completed ? open("Inspect completed run", "admin@t-bank", `#/trustops/${completed.run_id}`) : "", completed ? el("button", { type: "button", class: "secondary", onclick: safe(async () => {
         const result = await api(`/v1/evidence/${completed.run_id}/verify`, { method: "POST" });
@@ -339,7 +342,7 @@ routes.assessment = async (aid) => {
     wrap.replaceChildren(
       el("div", { class: "module-page-heading" }, el("span", { class: "eyebrow" }, "YOUR AI ASSESSMENT"), el("h2", {}, ctx.a.ai_system_name),
         el("p", {}, "Share your documents, answer a few questions, then send your assessment for review."), el("span", { class: `tag ${frozen ? "ok" : "medium"}` }, ctx.a.status)),
-      assessmentGuide(!state.me.is_staff && state.me.roles.some((r) => ["customer_admin", "customer_architect"].includes(r))),
+      el("details", {class:"module-panel assessment-introduction"}, el("summary",{},"Assessment guide & sample documents"), assessmentGuide(!state.me.is_staff && state.me.roles.some((r) => ["customer_admin", "customer_architect"].includes(r)))),
       state.cfg.assessment_model === "demo" ? el("p", { class: "assessment-model-notice", role: "status" }, "DEMO ENVIRONMENT: AI analysis here uses scripted examples. Real customer documents need a connected AI service and reviewer approval. Sample reports are illustrations only.")
         : state.cfg.assessment_model === "unavailable" ? el("p", { class: "assessment-model-notice", role: "status" }, "Document AI analysis is not connected yet. You can upload documents and complete the questionnaire for review; automatic document findings and the diagnostic roadmap require the AI service.") : "",
       el("nav", { class: "assessment-steps", "aria-label": "Assessment steps" },
@@ -768,7 +771,7 @@ routes.trustops = async (selectedRunId) => {
     packCard("Framework library", "EU AI Act, ISO 42001, NIST AI RMF, SR 11-7 and FDA SaMD requirements.", "REFERENCE · AVAILABLE", "#/frameworks"),
     packCard("Agent Flow", "Watch all agents work through a flow, step by step.", "LIVE VIEW", "#/agent-flow"),
     packCard("More workflow packs", "Additional governed workflows are added as packs; none are configured yet.", "PLANNED", null));
-  const page = el("div", { class: "trustops-page" }, packs,
+  const page = el("div", { class: "trustops-page" },
     el("section", { class: "trustops-hero" }, el("div", {}, el("span", { class: "eyebrow" }, "CLOUDSEALS · TRUSTOPS CORE"),
       el("h2", {}, "LedgerSight AR / Cash"), el("p", {}, "Governed cash application with a traceable decision at every step.")),
       el("div", { class: "hero-badges" }, el("span", { class: "environment-pill" }, isSandbox ? "SANDBOX ENVIRONMENT" : "RUNTIME UNAVAILABLE"),
@@ -783,7 +786,8 @@ routes.trustops = async (selectedRunId) => {
       [["Runs", overview.runs], ["Completed", overview.completed], ["Needs approval", overview.approval_required], ["Escalated", overview.escalated]].map(([label, value], i) =>
         el("article", { class: "metric-card" }, el("span", { class: "metric-icon", "aria-hidden": "true" }, ["↗", "✓", "◷", "!"][i]),
           el("span", { class: "metric-value" }, String(value)), el("span", { class: "metric-label" }, label)))),
-    flow,
+    ...(selectedRunId ? [detail] : []),
+    el("details", { class: "workflow-start-section", open: !selectedRunId }, el("summary", {}, "Start a workflow & recent runs"), flow,
     el("section", { class: "workbench-grid" },
       canStart ? el("article", { class: "workbench-card run-composer" },
         el("div", { class: "section-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "NEW EXECUTION"), el("h3", {}, "Start a workflow")),
@@ -800,11 +804,11 @@ routes.trustops = async (selectedRunId) => {
           invoiceRows, addInvoiceButton),
         el("div", { class: "composer-footer" }, el("span", { class: "help" }, "Exact matches proceed; ambiguous cases are escalated."), runButton)) : "",
       el("article", { class: "workbench-card history-card" }, el("div", { class: "section-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "TENANT ACTIVITY"), el("h3", {}, "Recent runs")),
-        el("span", { class: "section-count" }, `${total} total`)), history)),
-    detail,
-    el("section", { class: "agent-section" }, el("div", { class: "section-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "THE SPECIALIST TEAM"),
+        el("span", { class: "section-count" }, `${total} total`)), history))),
+    ...(!selectedRunId ? [detail] : []),
+    el("details", { class: "agent-section" }, el("summary", {}, "About the six workflow agents"), el("div", { class: "section-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "THE SPECIALIST TEAM"),
       el("h3", {}, "Six focused agents")), el("span", { class: "section-count" }, "01 — 06")),
-      el("div", { class: "agent-grid" }, agentCards)));
+      el("div", { class: "agent-grid" }, agentCards)), el("details", {class:"workflow-pack-details"}, el("summary",{},"Explore available workflows & references"),packs));
   main.replaceChildren(page);
   if (runs.length) await drawDetail(selectedRunId || runs[0].run_id);
 };
@@ -821,7 +825,7 @@ const runStatusLabel = (status) => ({ completed: "Completed", escalated: "Escala
 const runStatusTag = (run) => el("span", { class: `tag ${run.status === "completed" ? "ok" : ["escalated", "rejected"].includes(run.status) ? "high" : ""}` }, runStatusLabel(run.status));
 const decisionLabel = (run) => {
   const code = run.policy_decision?.reason_code || run.policy_decision?.decision;
-  return ({ multiple_exact_candidates: "Multiple invoice matches", exact_match_within_limit: "Exact match within limits",
+  return ({ multiple_exact_candidates: "Multiple invoice matches", no_exact_match: "No invoice matched", high_value_controller_approval_required: "Controller approval required", exact_match_within_limit: "Exact match within limits",
     allow: "Within policy", escalate: "Review required" })[(code || "").toLowerCase()] || (code ? code.replaceAll("_", " ").replace(/^\w/, (c) => c.toUpperCase()) : "Pending review");
 };
 const openRunLink = (run) => el("a", { href: `#/trustops/${encodeURIComponent(run.run_id)}` }, "Open trace");
@@ -829,55 +833,54 @@ const runTable = (runs, headings = ["Receipt", "Amount", "Decision", "Status", "
   el("table", { class: "module-table" }, el("thead", {}, el("tr", {}, headings.map((h) => el("th", { scope: "col" }, h)))),
     el("tbody", {}, runs.map((r) => el("tr", {},
       el("td", {}, r.receipt_id), el("td", {}, `${r.currency || ""} ${((r.amount_minor || 0) / 100).toFixed(2)}`),
-      el("td", {}, r.policy_decision?.reason_code || r.policy_decision?.decision || "Pending"), el("td", {}, runStatusTag(r)), el("td", {}, openRunLink(r)))))));
+      el("td", {}, decisionLabel(r)), el("td", {}, runStatusTag(r)), el("td", {}, openRunLink(r)))))));
 
+const workspaceHeading = (eyebrow, title, description, action) => el("div", { class: "workspace-heading" },
+  el("div", {}, el("span", { class: "eyebrow" }, eyebrow), el("h2", {}, title), el("p", {}, description)), action || "");
+const workspaceStats = (items) => el("section", { class: "workspace-stats" }, items.map(([label, value, hint]) => el("article", {}, el("span", {}, label), el("strong", {}, String(value)), el("small", {}, hint))));
 routes.dashboard = async () => {
-  const [overview, { items: runs }, { items: assessments }] = await Promise.all([
-    api("/v1/agentops"), api("/v1/runs?limit=100"), api("/v1/assessments")]);
-  const canUseAdminMetrics = state.me.roles.some((role) => ["cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor"].includes(role));
-  const staffMetrics = canUseAdminMetrics ? await api("/v1/admin/metrics") : null;
-  const cards = [
-    moduleCard("LedgerSight AR / Cash", "Review payments, match invoices and create a governed cash application outcome.", "SANDBOX WORKFLOW", "trustops", "module-card-primary"),
-    moduleCard("AI Architecture Diagnosis", "Assess systems, answer the versioned questionnaire, attach evidence and review published reports.", "ASSESSMENTS", "assessments"),
-    moduleCard("AI Use Cases", "Read your documents, list the AI use cases they evidence and review each one before any analysis.", "DOCUMENT AGENT", "use-cases"),
-    moduleCard("Reconciliation", "Inspect receipt matches, allocation proposals and policy outcomes.", "LIVE RUN DATA", "reconciliation"),
-    moduleCard("Exceptions", "Review ambiguous matches, escalations and rejected workflow actions.", "LIVE RUN DATA", "exceptions"),
-    moduleCard("Approvals", "Handle controller decisions with maker-checker separation.", "ROLE-GATED", "approvals"),
-    moduleCard("Evidence Fabric", "Review run evidence and verify its integrity chain and signatures.", "TAMPER-EVIDENT", "evidence"),
-    moduleCard("Readiness", "Track assessment completion and reviewer-approved reports.", "ASSESSMENT STATUS", "readiness"),
-    moduleCard("Frameworks", "EU AI Act, ISO 42001, NIST AI RMF, SR 11-7 and FDA SaMD reference requirements and controls.", "REFERENCE LIBRARY", "frameworks"),
-    moduleCard("Shadow ROI", "ROI measurement is unavailable until baseline and cost telemetry are configured.", "NOT CONFIGURED", "shadow-roi"),
-  ];
-  const metrics = staffMetrics
-    ? [["Assessments", staffMetrics.assessments], ["Submitted", staffMetrics.submitted], ["In review", staffMetrics.review_queue], ["Published reports", staffMetrics.published_reports]]
-    : [["Assessments", assessments.length], ["Workflow runs", overview.runs], ["Completed", overview.completed], ["Needs approval", overview.approval_required]];
-  const tenant = state.me.tenant ? tenantLabel(state.me.tenant) : state.me.is_staff ? "CloudSeals operations" : "Customer workspace";
-  const metricNotes = canUseAdminMetrics ? ["In this workspace", "Awaiting submission", "Reviewer queue", "Approved and available"]
-    : ["In this workspace", "Across all workflows", "Successfully completed", "Waiting for controller"];
-  const activity = runs.length ? el("div", { class: "dashboard-activity-list", "aria-label": "Latest workflow activity" }, runs.slice(0, 5).map((run) =>
-    el("article", { class: "dashboard-activity-row" },
-      el("div", { class: "activity-main" }, el("span", { class: "activity-mark", "aria-hidden": "true" }, run.status === "completed" ? "✓" : run.status === "escalated" ? "!" : "↗"),
-        el("div", {}, el("strong", {}, run.receipt_id), el("span", {}, decisionLabel(run)))),
-      el("span", { class: "activity-amount" }, `${run.currency || ""} ${((run.amount_minor || 0) / 100).toFixed(2)}`), runStatusTag(run),
-      el("a", { class: "activity-open", href: `#/trustops/${encodeURIComponent(run.run_id)}`, "aria-label": `Open workflow trace for ${run.receipt_id}` }, "View trace →"))))
-    : el("div", { class: "dashboard-empty" }, el("span", { class: "dashboard-empty-mark", "aria-hidden": "true" }, "↗"),
-      el("div", {}, el("strong", {}, "No workflow activity yet"), el("p", {}, "Start a LedgerSight workflow to see payment decisions and traceable outcomes here.")),
-      el("a", { href: "#/trustops" }, "Start a workflow →"));
-  main.replaceChildren(el("div", { class: "module-page command-center-page" },
-    el("section", { class: "command-hero" },
-      el("div", { class: "command-hero-copy" }, el("span", { class: "eyebrow" }, "CLOUDSEALS · TRUSTOPS"),
-        el("h2", {}, "Command Center"), el("p", {}, "A clear view of your assessments, governed workflows and decisions that need attention."),
-        el("div", { class: "command-hero-actions" }, el("a", { class: "command-action command-action-primary", href: "#/trustops" }, "Start a workflow", el("span", { "aria-hidden": "true" }, "→")),
-          el("a", { class: "command-action", href: "#/assessments" }, "Open diagnosis"))),
-      el("div", { class: "command-hero-side" }, el("span", { class: "workspace-mark", "aria-hidden": "true" }, tenant.slice(0, 1).toUpperCase()),
-        el("div", {}, el("span", { class: "workspace-label" }, "WORKSPACE"), el("strong", {}, tenant)))),
-    el("section", { class: "module-metrics command-metrics", "aria-label": "Workspace summary" }, metrics.map(([label, value], index) =>
-      el("article", { class: `command-metric metric-accent-${index + 1}` }, el("span", { class: "command-metric-icon", "aria-hidden": "true" }, ["◫", "↗", "✓", "◷"][index]),
-        el("div", {}, el("span", {}, label), el("strong", {}, String(value)), el("small", {}, metricNotes[index]))))),
-    el("section", { class: "command-modules" }, el("div", { class: "command-section-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "YOUR WORKSPACE"),
-      el("h3", {}, "Operations and governance")), el("span", { class: "section-count" }, "8 modules")), el("div", { class: "module-card-grid dashboard-card-grid" }, cards)),
-    el("section", { class: "module-panel dashboard-activity-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "LATEST ACTIVITY"),
-      el("h3", {}, "Recent workflow decisions")), el("a", { href: "#/reconciliation" }, "All activity →")), activity)));
+  const [overview, { items: runs }, { items: assessments }] = await Promise.all([api("/v1/agentops"), api("/v1/runs?limit=100"), api("/v1/assessments")]);
+  const tenant = state.me.tenant ? tenantLabel(state.me.tenant) : "CloudSeals";
+  const attention = runs.filter(r => ["approval_required", "escalated"].includes(r.status));
+  const journey = (n, title, text, href, label) => el("a", {class:"journey-card",href}, el("span", {class:"journey-number"}, n), el("h3", {}, title), el("p", {}, text), el("span", {class:"journey-action"}, label, " →"));
+  main.replaceChildren(el("div", {class:"module-page overview-page"},
+    workspaceHeading("YOUR TRUSTOPS WORKSPACE", "AI oversight. A clear next step.", `${tenant} · Assess your AI, govern its actions and review the evidence.`, el("a", {class:"btn",href:"#/assessments"}, "Start an assessment", " +")),
+    workspaceStats([["AI assessments", assessments.length,"Systems in this workspace"],["Workflow runs",overview.runs,"Recorded executions"],["Completed",overview.completed,"Workflow actions completed"],["Awaiting approval",overview.approval_required,"Controller decision needed"]]),
+    el("section",{class:"workspace-journey"},
+      journey("01","Understand your AI","Share your documents and assess the controls around each AI system.","#/assessments","Open assessments"),
+      journey("02","See the work happen","Follow each worker, inspect the decision and keep people in control.","#/agent-flow","Open agent workflow"),
+      journey("03","Review the outcome","Find published reports, workflow decisions and their supporting evidence.","#/reports","View reports & results")),
+    el("div",{class:"overview-columns"},
+      el("section",{class:"module-panel"},el("div",{class:"module-panel-heading"},el("div",{},el("span",{class:"eyebrow"},"RECENT ACTIVITY"),el("h3",{},"Workflow decisions")),el("a",{href:"#/trustops"},"View all →")), runs.length ? runTable(runs.slice(0,5)) : el("p",{class:"empty-state"},"Your first workflow result will appear here.")),
+      el("section",{class:"module-panel attention-panel"},el("span",{class:"eyebrow"},"HUMAN OVERSIGHT"),el("h3",{},"Needs attention"),
+        attention.length ? attention.slice(0,4).map(r => el("a",{class:"attention-item",href:`#/trustops/${r.run_id}`},el("strong",{},r.receipt_id),runStatusTag(r),el("small",{},decisionLabel(r)))) : el("p",{class:"empty-state"},"No pending reviews in the latest 100 runs."),
+        el("a",{class:"text-link",href:"#/approvals"},"Open approval queue →"))),
+    el("section",{class:"workspace-note"},el("span",{class:"note-icon","aria-hidden":"true"},"i"),el("p",{},overview.agent_mode === "deterministic" ? "Payment workers use defined matching and policy rules. Human approvals and evidence stay part of the workflow." : "Model-assisted recommendations remain subject to policy checks and human approval."),el("a",{href:"#/evidence"},"Explore evidence →"))));
+};
+
+routes.reports = async () => {
+  const [{items: assessments}, {items: runs}] = await Promise.all([api("/v1/assessments"),api("/v1/runs?limit=100")]);
+  const groups = await Promise.all(assessments.map(async assessment => ({assessment, reports:(await api(`/v1/assessments/${assessment.assessment_id}/reports`)).items})));
+  const published = groups.flatMap(({assessment,reports}) => reports.filter(r=>r.status === "published").map(report=>({assessment,report})));
+  const content = el("div",{class:"results-content"});
+  const tabs = el("div",{class:"workspace-tabs",role:"tablist","aria-label":"Result type"});
+  const query = el("input",{type:"search",placeholder:"Search by AI system or receipt…","aria-label":"Search reports and results"});
+  let selected = "reports";
+  const draw = () => {
+    tabs.replaceChildren(...[["reports","Assessment reports",published.length],["runs","Workflow results",runs.length]].map(([key,label,count])=>el("button",{role:"tab",id:`results-tab-${key}`,"aria-controls":"results-panel","aria-selected":String(selected===key),onclick:()=>{selected=key;draw();}},label,el("span",{},String(count)))));
+    const term=query.value.trim().toLowerCase();
+    content.setAttribute("role","tabpanel"); content.id="results-panel"; content.setAttribute("aria-labelledby",`results-tab-${selected}`);
+    if(selected === "runs") { const filtered=runs.filter(r=>`${r.receipt_id} ${runStatusLabel(r.status)} ${decisionLabel(r)}`.toLowerCase().includes(term)); content.replaceChildren(el("section",{class:"module-panel"},el("h3",{},"Decisions and execution traces"),el("p",{class:"help"},"Open a result to inspect the proposal, policy decision, agent steps and evidence."),filtered.length ? runTable(filtered) : el("p",{class:"empty-state"},"No workflow results match your search."))); return; }
+    const filtered=published.filter(({assessment})=>assessment.ai_system_name.toLowerCase().includes(term));
+    content.replaceChildren(el("div",{class:"report-library"},filtered.length ? filtered.map(({assessment:a,report:r})=>el("article",{class:"report-library-card"},
+      el("div",{class:"report-cover","aria-hidden":"true"},el("span",{},"CLOUDSEALS"),el("strong",{},"AI assessment"),el("span",{},"REPORT"),el("div",{class:"report-cover-lines"})),
+      el("div",{class:"report-library-copy"},el("span",{class:"tag ok"},"Published"),el("h3",{},a.ai_system_name),el("p",{},`${a.industry} · Version ${r.version}`),el("p",{class:"help"},"Assessment findings and supporting answers, released after review."),
+        el("div",{class:"row"},el("button",{onclick:safe(()=>dl(`/v1/assessments/${a.assessment_id}/reports/${r.report_id}/download?format=pdf`,"TrustOps-assessment.pdf"))},"Download PDF ↓"),el("button",{class:"secondary",onclick:safe(()=>dl(`/v1/assessments/${a.assessment_id}/reports/${r.report_id}/download?format=docx`,"TrustOps-assessment.docx"))},"Word")),
+        el("a",{class:"text-link",href:`#/assessment/${a.assessment_id}`},"View assessment & findings →")))) : el("div",{class:"module-panel empty-state"},"No published reports match your search. Reports appear here after review and publication.")),
+      el("section",{class:"workspace-note"},el("p",{},"Looking for a report still in progress? Open its assessment to check the review status."),el("a",{href:"#/assessments"},"View assessments →")));
+  };
+  query.addEventListener("input",draw);draw();
+  main.replaceChildren(el("div",{class:"module-page results-page"},workspaceHeading("OUTCOMES & EVIDENCE","Reports & results","Published assessment reports and traceable workflow decisions, together in one place."),workspaceStats([["Published reports",published.length,"Available to download"],["AI assessments",assessments.length,"Including work in progress"],["Workflow results",runs.length,"Latest 100 executions"]]),el("div",{class:"results-toolbar"},tabs,query),content));
 };
 
 routes.reconciliation = async () => {
@@ -1286,47 +1289,30 @@ routes["agent-flow"] = async () => {
   const roles = state.me.roles;
   const [{ items: assessments }, overview] = await Promise.all([api("/v1/assessments"), api("/v1/agentops")]);
   const runtimeUp = overview.mode === "sandbox";
-  let flow = runtimeUp ? "payment" : "diagnosis", preset = "low", running = false, assessmentId = assessments[0]?.assessment_id || "", nodes = [], summary = null, current = -1;
-  const reset = () => { nodes = FLOW_NODES[flow].map(([id, name, does]) => ({ id, name, does, state: "waiting", lines: [], ms: null, caption: "" })); summary = null; current = -1; };
+  let flow = runtimeUp ? "payment" : "diagnosis", preset = "low", running = false, assessmentId = assessments[0]?.assessment_id || "", nodes = [], summary = null;
+  const reset = () => { nodes = FLOW_NODES[flow].map(([id, name, does]) => ({ id, name, does, state: "waiting", lines: [], ms: null, caption: "" })); summary = null; };
   reset();
+  let paymentInput = paymentBody(preset);
+  const inputPreview = el("div", {class:"workflow-input-preview"});
   const note = el("p", { class: "module-note" });
-  const stage = el("div", { class: "af-stage", "aria-hidden": "true" }), bubble = el("div", { class: "af-bubble", "aria-live": "polite" });
   const list = el("ol", { class: "af-list" }), banner = el("div", { class: "af-banner" }), controls = el("div", { class: "af-controls" });
-  const office = createAgentOffice(el, { onRun: () => runBtn.click() });
-  const officeToggle = el("button", { type: "button", class: "secondary", "aria-expanded": "true", onclick: (e) => {
-    office.element.hidden = !office.element.hidden;
-    e.currentTarget.setAttribute("aria-expanded", String(!office.element.hidden));
-    e.currentTarget.textContent = office.element.hidden ? "Show office view" : "Hide office view";
-  } }, "Hide office view");
-  const initials = (n) => n.name.split(" ").map((w) => w[0]).join("").slice(0, 2);
   const draw = () => {
-    office.update({ nodes, flow, current, running });
     const done = nodes.filter((n) => ["done", "skipped", "failed"].includes(n.state)).length;
     note.textContent = flow === "payment"
-      ? "Each step below is driven by an execution event from the workflow service. Select a desk to inspect the returned result. External ERP posting is not enabled in this workspace."
+      ? "Each step below is driven by an execution event from the workflow service. Inspect the returned result below. External ERP posting is not enabled in this workspace."
       : "Each agent is a separate real call. Agents you cannot use, or that have nothing to work on yet, are marked Skipped with the reason. Output is advisory and never saved as an answer.";
     banner.replaceChildren(el("div", { class: "af-progress" }, progressFill(Math.round(done / nodes.length * 100))),
       el("span", {}, running ? `Running… ${done} of ${nodes.length} agents finished` : done ? `${done} of ${nodes.length} agents finished` : "Choose a flow and press Run"), summary || "");
-    const parts = [];
-    nodes.forEach((n, i) => {
-      parts.push(el("div", { class: `af-agent is-${n.state}` }, el("div", { class: "af-orb" }, el("span", {}, n.state === "done" ? "✓" : n.state === "failed" ? "!" : n.state === "skipped" ? "–" : initials(n))), el("small", {}, n.name)));
-      if (i < nodes.length - 1) parts.push(el("div", { class: `af-link ${nodes[i + 1].state !== "waiting" ? "is-done" : n.state === "done" ? "is-travel" : ""}` }, el("i", {})));
-    });
-    stage.replaceChildren(...parts);
-    const cur = nodes[current];
-    bubble.replaceChildren(cur && cur.state === "running" ? el("div", { class: "af-thinking" }, el("span", { class: "af-dots" }, el("i", {}), el("i", {}), el("i", {})), el("strong", {}, `${cur.name} `), cur.caption)
-      : cur && cur.lines.length ? el("div", { class: "af-said" }, el("strong", {}, `${cur.name}: `), cur.lines[0]) : el("span", { class: "help" }, running ? "" : "The active agent will show what it is doing here."));
     list.replaceChildren(...nodes.map((n, i) => el("li", { class: `af-node is-${n.state}` },
       el("span", { class: "af-dot", "aria-hidden": "true" }, n.state === "done" ? "✓" : n.state === "failed" ? "!" : n.state === "skipped" ? "–" : String(i + 1)),
-      el("div", { class: "af-card" }, el("div", { class: "af-card-head" }, el("strong", {}, n.name), el("span", { class: `af-chip ${n.state}` }, n.state === "running" ? el("span", { class: "spin", "aria-hidden": "true" }) : "", FLOW_STATE[n.state]),
+      el("div", { class: "af-card" }, el("div", { class: "af-card-head" }, el("strong", {}, n.name), el("span", { class: `af-chip ${n.state}` }, FLOW_STATE[n.state]),
         n.ms != null ? el("small", {}, `${n.ms} ms`) : ""), el("p", {}, n.does),
-        n.lines.length ? el("ul", { class: "af-out" }, n.lines.map((l) => el("li", {}, l))) : ""))));
+        n.lines.length ? el("details", {class:"worker-output"}, el("summary",{}, n.lines[0]), el("ul", { class: "af-out" }, n.lines.slice(1).map((l) => el("li", {}, l)))) : ""))));
   };
   const set = (i, patch) => { Object.assign(nodes[i], patch); draw(); };
-  const skip = (i, why) => { current = i; set(i, { state: "skipped", lines: [why] }); };
+  const skip = (i, why) => { set(i, { state: "skipped", lines: [why] }); };
   // Status follows the pending request, with no artificial work timers.
   async function act(i, task) {
-    current = i;
     set(i, { state: "running", lines: [], caption: "Request in progress…" });
     const t = performance.now();
     try { const res = await task(); set(i, { ms: Math.round(performance.now() - t), ...res }); }
@@ -1334,7 +1320,7 @@ routes["agent-flow"] = async () => {
   }
 
   async function runPayment() {
-    const response = await api("/v1/workflows/ledgersight.ar_cash/runs/stream", { method: "POST", idem: true, raw: true, body: paymentBody(preset) });
+    const response = await api("/v1/workflows/ledgersight.ar_cash/runs/stream", { method: "POST", idem: true, raw: true, body: paymentInput });
     if (!response.ok) throw new Error((await response.json()).message || "Workflow could not be started");
     const reader = response.body.getReader(), decoder = new TextDecoder(), starts = new Map();
     let buffer = "", run = null;
@@ -1343,7 +1329,6 @@ routes["agent-flow"] = async () => {
       if (event.event === "run.completed") { run = event.run; return; }
       const i = nodes.findIndex(n => n.id === event.agent_id);
       if (i < 0) return;
-      current = i;
       if (event.event === "agent.started") {
         starts.set(i, event.at);
         set(i, { state: "running", lines: [], caption: "Executing workflow step…" });
@@ -1371,7 +1356,7 @@ routes["agent-flow"] = async () => {
         return { state: "done", lines: [result.summary, result.decision_reason] };
       });
       const pd = run.policy_decision;
-      summary = el("div", { class: "af-result" }, el("strong", {}, `Policy decision: ${pd.decision}`), ` · ${pd.reason_code.replaceAll("_", " ").toLowerCase()} · `,
+      summary = el("div", { class: `af-result${pd.decision === "ALLOW" ? "" : " needs-review"}` }, el("strong", {}, `Policy decision: ${pd.decision}`), ` · ${pd.reason_code.replaceAll("_", " ").toLowerCase()} · `,
         el("a", { href: `#/trustops/${run.run_id}` }, "Open full run →"));
     } catch (error) {
       const failed = nodes.findIndex(n => n.state === "running");
@@ -1458,8 +1443,8 @@ routes["agent-flow"] = async () => {
     runBtn.disabled = running;
     const tab = (id, label) => el("button", { class: flow === id ? "" : "secondary", disabled: running || (id === "payment" && !runtimeUp), title: id === "payment" && !runtimeUp ? "The governed workflow runtime is not enabled in this environment" : null, onclick: () => { flow = id; reset(); drawControls(); draw(); } }, label);
     const picker = flow === "payment"
-      ? el("label", {}, "Scenario", el("select", { disabled: running, onchange: (e) => { preset = e.target.value; } }, Object.entries(PRESETS).map(([v, l]) => el("option", { value: v, selected: v === preset }, l))))
-      : el("label", {}, "Assessment", el("select", { disabled: running, onchange: (e) => { assessmentId = e.target.value; } },
+      ? el("label", {}, "Scenario", el("select", { disabled: running, onchange: (e) => { preset = e.target.value; paymentInput = paymentBody(preset); reset(); drawControls(); draw(); } }, Object.entries(PRESETS).map(([v, l]) => el("option", { value: v, selected: v === preset }, l))))
+      : el("label", {}, "Assessment", el("select", { disabled: running, onchange: (e) => { assessmentId = e.target.value; reset(); draw(); } },
         assessments.length ? assessments.map((a) => el("option", { value: a.assessment_id, selected: a.assessment_id === assessmentId }, `${a.ai_system_name} (${a.status})`)) : el("option", { value: "" }, "No assessments")));
     const demo = flow === "diagnosis" && !assessments.length && state.cfg.mode === "dev" ? el("button", { class: "secondary", disabled: running, onclick: safe(async () => {
       const a = await api("/v1/assessments", { method: "POST", idem: true, body: { ai_system_name: "Demo credit agent", industry: "banking", questionnaire_version: "1.0.0" } });
@@ -1468,14 +1453,26 @@ routes["agent-flow"] = async () => {
       await api(g.upload_url, { method: "PUT", body: data.buffer, headers: { "Content-Type": "application/octet-stream" } });
       toast("Demo assessment created"); await routes["agent-flow"]();
     }) }, "Create a demo assessment with sample evidence") : "";
-    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (9 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn));
+    if (flow === "payment") inputPreview.replaceChildren(...[["PAYMENT", `${paymentInput.receipt.currency} ${(paymentInput.receipt.amount_minor/100).toFixed(2)}`],["CANDIDATE INVOICES", String(paymentInput.invoices.length)],["REMITTANCE",paymentInput.remittance.reference]].map(([label,value])=>el("div",{},el("small",{},label),el("strong",{},value))));
+    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (9 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn), flow === "payment" ? inputPreview : "");
   }
   drawControls(); draw();
-  main.replaceChildren(moduleFrame("AGENTS · OFFICE VIEW", "AI Agents Office", "Meet your specialist team. Select a desk to inspect its task, status and returned output. Use Run agents to start the selected workflow.",
+  main.replaceChildren(moduleFrame("AGENT WORKSPACE", "From input to a governed decision.", "Choose a scenario. Follow the workers. Review the result and its evidence.",
+    el("details", { class: "module-panel agent-explainer" }, el("summary", {}, "How do these agents work?"),
+      el("p", {}, "An agent is a software worker with one specific job. Here, six workers check the payment, compare invoices, apply policy and prepare an evidence record. A seventh helper summarises the decision."),
+      el("p", { class: "help" }, overview.agent_mode === "deterministic" ? "Current payment mode: rule-based workers. LLM document analysis requires a configured model connection." : "A model-assisted runtime is configured. Policy and approval rules remain authoritative."),
+      el("div", { class: "document-examples" },
+        el("div", {}, el("strong", {}, "Input"), el("p", { class: "help" }, "Payment receipt, invoice candidates and remittance reference.")),
+        el("div", {}, el("strong", {}, "Decision"), el("p", { class: "help" }, "Match the evidence, apply policy and route cases needing human review.")),
+        el("div", {}, el("strong", {}, "Outcome"), el("p", { class: "help" }, "A proposal, approval requirement and traceable results. A recommendation is not an executed payment.")))),
+    el("section", { class: "module-panel af-panel simple-agent-flow" }, controls, banner, list, note),
+    el("details", { class: "module-panel workflow-presenter-guide" }, el("summary", {}, "Presenter guide"),
+      el("ol", { class: "workflow-demo-guide" },
+        el("li", {}, "Run an exact-match scenario. Show the input, matched invoice and policy decision."),
+        el("li", {}, "Run a high-value scenario. Show that a controller approval is required; the agent cannot approve its own action."),
+        el("li", {}, "Open the run trace, inspect the proposed action and verify its evidence.")),
+      state.cfg.mode === "dev" ? el("a", { class: "btn secondary", href: "#/demo" }, "Open the full demo walkthrough →") : "")));
 
-    el("section", { class: "module-panel af-panel" }, controls, banner, officeToggle, office.element,
-      el("details", { class: "office-trace", open: true }, el("summary", {}, "Step-by-step activity"), el("div", { class: "af-sticky" }, stage, bubble), list),
-      note)));
 };
 
 

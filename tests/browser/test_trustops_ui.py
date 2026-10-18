@@ -6,6 +6,7 @@ from playwright.sync_api import expect
 
 def test_hub_strip_lists_the_packs_and_tools(as_user, assessment):
     page = as_user("admin@t-bank", "trustops")
+    page.get_by_text("Explore available workflows & references", exact=True).click()
     strip = page.locator(".pack-strip")
     expect(strip).to_be_visible()
     for name in ("LedgerSight AR / Cash", "AI governance diagnostic", "Framework library", "Agent Flow", "More workflow packs"):
@@ -53,7 +54,7 @@ def test_high_value_run_needs_a_different_person_to_approve(as_user, api):
     expect(ctl.locator(".approval-card")).to_have_count(pending - 1)
 
 
-def test_payment_agent_flow_animates_all_seven_agents_in_order(as_user):
+def test_payment_agent_flow_shows_real_results_without_office_animation(as_user):
     page = as_user("admin@t-bank", "agent-flow")
     with page.expect_response(lambda r: r.url.endswith("/runs/stream") and r.request.method == "POST") as stream:
         page.get_by_role("button", name="▶ Run agents").click()
@@ -63,8 +64,7 @@ def test_payment_agent_flow_animates_all_seven_agents_in_order(as_user):
     expect(page.locator("main")).not_to_contain_text("NO AGENTS EXECUTED")
     expect(page.locator(".af-result")).to_be_visible(timeout=60_000)
     expect(page.locator(".af-node.is-done")).to_have_count(7)
-    expect(page.locator(".af-agent.is-done")).to_have_count(7)
-    expect(page.locator(".office-seat.is-done")).to_have_count(7)
+    expect(page.locator(".office-world-canvas")).to_have_count(0)
     assert page.evaluate("document.querySelector('.af-progress-bar').style.width") == "100%"
     assert page.errors == []
 
@@ -78,3 +78,28 @@ def test_diagnosis_flow_skips_what_a_customer_may_not_do_and_says_why(as_user, a
     expect(page.locator(".af-node", has_text="Interviewer")).to_have_class(re.compile("is-done"))
     expect(page.locator(".af-node", has_text="Inventory Agent")).to_have_class(re.compile("is-done"))
     expect(page.locator(".af-node", has_text="POC Drafter")).to_contain_text("CloudSeals assessor", timeout=60_000)
+
+
+def test_results_library_searches_real_workflow_receipts(as_user, api):
+    receipt = f"RESULT-{uuid.uuid4().hex[:10]}"
+    api("admin@t-bank", "POST", "/v1/workflows/ledgersight.ar_cash/runs", {
+        "receipt": {"receipt_id": receipt, "amount_minor": 25000, "currency": "USD", "reference": receipt},
+        "invoices": [{"invoice_id": receipt, "amount_minor": 25000, "currency": "USD", "reference": receipt}],
+        "remittance": {"reference": receipt},
+    })
+    page = as_user("admin@t-bank", "reports")
+    page.get_by_role("tab", name=re.compile("Workflow results")).click()
+    page.get_by_role("searchbox").fill(receipt)
+    expect(page.locator(".module-table tbody tr")).to_have_count(1)
+    expect(page.get_by_role("link", name="Open trace", exact=True)).to_be_visible()
+    page.get_by_role("searchbox").fill("no-such-receipt-" + uuid.uuid4().hex)
+    expect(page.get_by_text("No workflow results match your search.")).to_be_visible()
+    assert page.errors == []
+
+
+def test_customer_overview_fits_phone_width(as_user):
+    page = as_user("admin@t-bank", "dashboard", width=390, height=844)
+    expect(page.get_by_role("heading", name="AI oversight. A clear next step.")).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    expect(page.get_by_role("link", name="Reports & results", exact=True)).to_have_count(1)
+    assert page.errors == []
