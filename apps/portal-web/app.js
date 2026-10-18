@@ -473,6 +473,10 @@ function evidencePanel(ctx, draw) {
   return el("section", { class: "card assessment-documents", id: "assessment-documents" }, el("span", { class: "eyebrow" }, "STEP 2 · DOCUMENTS"), el("h3", {}, "Upload documents about your AI"),
     el("p", {}, "Start with any documents you already have. You can answer the questions even if you have no documents yet."),
     el("div", { class: "document-examples" }, [ ["AI register", "A list of your AI tools, their purpose and owners."], ["System overview", "How your AI works and which data or systems it uses."], ["Policies & test reports", "Your AI rules, approvals, risks or testing results."] ].map(([title, description]) => el("div", {}, el("strong", {}, title), el("p", { class: "help" }, description)))),
+    el("details",{class:"document-example-guide"},el("summary",{},"What can a document look like?"),
+      el("p",{},"Example AI register entry: ‘Customer support chatbot · Owner: Support team · Purpose: answer account FAQs · Cannot change customer accounts.’"),
+      el("p",{},"Example policy entry: ‘Authorised support staff review customer complaints about the chatbot.’"),
+      el("p",{class:"help"},"Use your existing files; this wording is only an example. Test and approval records help a reviewer check whether the stated controls are supported.")),
     list.length ? el("ul", {}, list) : el("p", { class: "help" }, "No files uploaded yet."), extractOut,
     el("label", { for: "ef" }, "Upload a document"), f,
     el("p", {}, el("button", { onclick: safe(async () => {
@@ -740,6 +744,7 @@ routes.trustops = async (selectedRunId) => {
         el("h3", {}, `${run.receipt_id}`), el("p", { class: "help" }, "Payment review and agent trace")),
         el("span", { class: `status-pill ${run.status === "completed" ? "status-success" : run.status === "escalated" || run.status === "rejected" ? "status-danger" : "status-neutral"}` }, run.status.replaceAll("_", " "))),
       decisionSummary,
+      el("div", {class:"run-meaning"},el("strong",{},"What this means"),el("p",{},runExplanation(run))),
       el("div", { class: "section-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "EXECUTION TRACE"), el("h3", {}, "Six-agent workflow")),
         el("span", { class: "tag" }, `${run.agent_trace.length} steps`)),
       el("ol", { class: "trace-timeline", "aria-label": "Workflow agent trace" }, trace),
@@ -838,6 +843,40 @@ const runTable = (runs, headings = ["Receipt", "Amount", "Decision", "Status", "
 const workspaceHeading = (eyebrow, title, description, action) => el("div", { class: "workspace-heading" },
   el("div", {}, el("span", { class: "eyebrow" }, eyebrow), el("h2", {}, title), el("p", {}, description)), action || "");
 const workspaceStats = (items) => el("section", { class: "workspace-stats" }, items.map(([label, value, hint]) => el("article", {}, el("span", {}, label), el("strong", {}, String(value)), el("small", {}, hint))));
+function customerExample(title, introduction, steps, action = null) {
+  return el("section", {class:"customer-example", "aria-label":title},
+    el("div", {class:"customer-example-heading"}, el("div",{},el("span",{class:"eyebrow"},"EXPLAINED WITH AN EXAMPLE"),el("h3",{},title),el("p",{},introduction)), action || ""),
+    el("div", {class:"customer-example-steps"}, steps.map(([label, text], i)=>el("div",{},el("span",{class:"example-step-index","aria-hidden":"true"},String(i+1).padStart(2,"0")),el("strong",{},label),el("p",{},text)))));
+}
+function overviewExamples(assessments) {
+  const content=el("div",{id:"overview-example-panel",role:"tabpanel"});
+  const tabs=el("div",{class:"example-switch",role:"tablist","aria-label":"Explore an example"});
+  const sample=assessments.find(a=>a.ai_system_name === "DEMO | Example Bank — AI payment operations");
+  let selected="assessment";
+  const draw=()=>{
+    tabs.replaceChildren(...[["assessment","Assess an AI system"],["payment","Control a payment action"]].map(([key,label])=>el("button",{role:"tab",id:`example-tab-${key}`,"aria-selected":String(selected===key),"aria-controls":"overview-example-panel",onclick:()=>{selected=key;draw();}},label)));
+    content.setAttribute("aria-labelledby",`example-tab-${selected}`);
+    content.replaceChildren(selected === "assessment"
+      ? customerExample("A bank wants to understand its AI risk.","Illustrative example · Start with the information the customer already has.",[
+        ["The customer shares","An AI register, system overview, approval policy and any available test reports. They answer questions about ownership, access and review."],
+        ["TrustOps helps assess","Answers and evidence support the assessment. Potential gaps go to a reviewer; a missing document alone does not prove a control is absent."],
+        ["The customer receives","A published assessment with findings, their supporting answers and prioritised improvement actions. Reports are released after review."]],
+        el("a",{class:"text-link",href:sample ? `#/assessment/${sample.assessment_id}` : "#/assessments"},sample ? "Explore the prepared example →" : "Open assessments →"))
+      : customerExample("A payment arrives. Should it be allocated?","Illustrative example · A USD 250 receipt refers to a matching invoice.",[
+        ["The customer provides","The receipt amount, currency, reference and candidate invoices."],
+        ["The workers check","Validate the receipt, compare invoices, explain the match and apply the configured policy. High-value or uncertain cases need human review."],
+        ["The customer sees","A proposal, the policy decision and a trace of each worker. A separate approval and execution process controls any action."]],el("a",{class:"text-link",href:"#/agent-flow"},"Try the payment example →")));
+  };draw();return el("section",{class:"overview-examples"},tabs,content);
+}
+const runExplanation = (run) => ({
+  ready_to_prepare:"The proposal is within policy. It can be prepared for execution; no action has been executed yet.",
+  approval_required:"A controller must review this proposal. The person who started it cannot approve their own action.",
+  escalated:"The workflow needs human review. Check the match details and resolve the uncertainty before proceeding.",
+  approved_to_prepare:"A controller has approved the proposal. It still needs preparation and execution before the action is complete.",
+  prepared:"The action has been prepared. An authorised user must execute it with a valid one-time token.",
+  completed:"The action completed through the configured connector. Inspect the execution receipt and verify its evidence.",
+  rejected:"The proposal was rejected. Review the recorded reason before starting a new workflow."
+})[run.status] || "Inspect the recorded decision and trace before taking the next action.";
 routes.dashboard = async () => {
   const [overview, { items: runs }, { items: assessments }] = await Promise.all([api("/v1/agentops"), api("/v1/runs?limit=100"), api("/v1/assessments")]);
   const tenant = state.me.tenant ? tenantLabel(state.me.tenant) : "CloudSeals";
@@ -850,6 +889,7 @@ routes.dashboard = async () => {
       journey("01","Understand your AI","Share your documents and assess the controls around each AI system.","#/assessments","Open assessments"),
       journey("02","See the work happen","Follow each worker, inspect the decision and keep people in control.","#/agent-flow","Open agent workflow"),
       journey("03","Review the outcome","Find published reports, workflow decisions and their supporting evidence.","#/reports","View reports & results")),
+    overviewExamples(assessments),
     el("div",{class:"overview-columns"},
       el("section",{class:"module-panel"},el("div",{class:"module-panel-heading"},el("div",{},el("span",{class:"eyebrow"},"RECENT ACTIVITY"),el("h3",{},"Workflow decisions")),el("a",{href:"#/trustops"},"View all →")), runs.length ? runTable(runs.slice(0,5)) : el("p",{class:"empty-state"},"Your first workflow result will appear here.")),
       el("section",{class:"module-panel attention-panel"},el("span",{class:"eyebrow"},"HUMAN OVERSIGHT"),el("h3",{},"Needs attention"),
@@ -874,13 +914,17 @@ routes.reports = async () => {
     const filtered=published.filter(({assessment})=>assessment.ai_system_name.toLowerCase().includes(term));
     content.replaceChildren(el("div",{class:"report-library"},filtered.length ? filtered.map(({assessment:a,report:r})=>el("article",{class:"report-library-card"},
       el("div",{class:"report-cover","aria-hidden":"true"},el("span",{},"CLOUDSEALS"),el("strong",{},"AI assessment"),el("span",{},"REPORT"),el("div",{class:"report-cover-lines"})),
-      el("div",{class:"report-library-copy"},el("span",{class:"tag ok"},"Published"),el("h3",{},a.ai_system_name),el("p",{},`${a.industry} · Version ${r.version}`),el("p",{class:"help"},"Assessment findings and supporting answers, released after review."),
+      el("div",{class:"report-library-copy"},el("span",{class:"tag ok"},"Published"),el("h3",{},a.ai_system_name),el("p",{},`${a.industry} · Version ${r.version}`),el("p",{class:"help"},"Findings, supporting answers and prioritised improvement actions, released after review."),
         el("div",{class:"row"},el("button",{onclick:safe(()=>dl(`/v1/assessments/${a.assessment_id}/reports/${r.report_id}/download?format=pdf`,"TrustOps-assessment.pdf"))},"Download PDF ↓"),el("button",{class:"secondary",onclick:safe(()=>dl(`/v1/assessments/${a.assessment_id}/reports/${r.report_id}/download?format=docx`,"TrustOps-assessment.docx"))},"Word")),
         el("a",{class:"text-link",href:`#/assessment/${a.assessment_id}`},"View assessment & findings →")))) : el("div",{class:"module-panel empty-state"},"No published reports match your search. Reports appear here after review and publication.")),
       el("section",{class:"workspace-note"},el("p",{},"Looking for a report still in progress? Open its assessment to check the review status."),el("a",{href:"#/assessments"},"View assessments →")));
   };
   query.addEventListener("input",draw);draw();
-  main.replaceChildren(el("div",{class:"module-page results-page"},workspaceHeading("OUTCOMES & EVIDENCE","Reports & results","Published assessment reports and traceable workflow decisions, together in one place."),workspaceStats([["Published reports",published.length,"Available to download"],["AI assessments",assessments.length,"Including work in progress"],["Workflow results",runs.length,"Latest 100 executions"]]),el("div",{class:"results-toolbar"},tabs,query),content));
+  main.replaceChildren(el("div",{class:"module-page results-page"},workspaceHeading("OUTCOMES & EVIDENCE","Reports & results","Published assessment reports and traceable workflow decisions, together in one place."),workspaceStats([["Published reports",published.length,"Available to download"],["AI assessments",assessments.length,"Including work in progress"],["Workflow results",runs.length,"Latest 100 executions"]]),el("details",{class:"module-panel report-explanation"},el("summary",{},"Which result should I open? See examples"),
+      customerExample("One assessment report. One workflow decision.","These answer different customer questions.",[
+        ["Assessment report","Example: ‘What should we improve around our AI system?’ Open a published report for findings, supporting answers and prioritised actions."],
+        ["Workflow result","Example: ‘Why did this payment need approval?’ Open its trace for the input, worker outputs, policy decision and proposed action."],
+        ["Supporting evidence","Follow the assessment evidence or workflow record to inspect what supports the result. Publication and execution are separate steps."]])),el("div",{class:"results-toolbar"},tabs,query),content));
 };
 
 routes.reconciliation = async () => {
@@ -1294,6 +1338,7 @@ routes["agent-flow"] = async () => {
   reset();
   let paymentInput = paymentBody(preset);
   const inputPreview = el("div", {class:"workflow-input-preview"});
+  const scenarioExplanation = el("div", {class:"scenario-explanation"});
   const note = el("p", { class: "module-note" });
   const list = el("ol", { class: "af-list" }), banner = el("div", { class: "af-banner" }), controls = el("div", { class: "af-controls" });
   const draw = () => {
@@ -1357,7 +1402,7 @@ routes["agent-flow"] = async () => {
       });
       const pd = run.policy_decision;
       summary = el("div", { class: `af-result${pd.decision === "ALLOW" ? "" : " needs-review"}` }, el("strong", {}, `Policy decision: ${pd.decision}`), ` · ${pd.reason_code.replaceAll("_", " ").toLowerCase()} · `,
-        el("a", { href: `#/trustops/${run.run_id}` }, "Open full run →"));
+        el("a", { href: `#/trustops/${run.run_id}` }, "Open full run →"), el("p",{class:"result-explanation"},runExplanation(run)));
     } catch (error) {
       const failed = nodes.findIndex(n => n.state === "running");
       set(failed >= 0 ? failed : 0, { state: "failed", lines: [error.message] });
@@ -1454,7 +1499,15 @@ routes["agent-flow"] = async () => {
       toast("Demo assessment created"); await routes["agent-flow"]();
     }) }, "Create a demo assessment with sample evidence") : "";
     if (flow === "payment") inputPreview.replaceChildren(...[["PAYMENT", `${paymentInput.receipt.currency} ${(paymentInput.receipt.amount_minor/100).toFixed(2)}`],["CANDIDATE INVOICES", String(paymentInput.invoices.length)],["REMITTANCE",paymentInput.remittance.reference]].map(([label,value])=>el("div",{},el("small",{},label),el("strong",{},value))));
-    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (9 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn), flow === "payment" ? inputPreview : "");
+    const scenarioCopy = {
+      low:["One payment, one matching invoice", "The amount, currency and reference agree. Workers check the match and policy; the returned decision tells you whether a proposal can proceed."],
+      high:["A matching invoice still needs oversight", "The amount is deliberately high. The workflow should require a controller's decision before preparation. Inspect the actual policy result after running."],
+      ambiguous:["Two invoices match the same payment", "The workers must not guess which invoice is correct. Inspect the escalation and candidate invoices, then have a person resolve the ambiguity."],
+      nomatch:["The receipt has no exact invoice match", "The candidate has a different amount and reference. Inspect the exception instead of treating an uncertain allocation as an exact match."]
+    };
+    if (flow === "payment") scenarioExplanation.replaceChildren(el("span",{class:"example-label"},"EXAMPLE INPUT"),el("strong",{},scenarioCopy[preset][0]),el("p",{},scenarioCopy[preset][1]));
+    else scenarioExplanation.replaceChildren(el("span",{class:"example-label"},"ASSESSMENT WALKTHROUGH"),el("strong",{},"From evidence to reviewed findings"),el("p",{},"For example, an AI register names a support chatbot and its owner. Workers help clarify answers, extract candidate information and prepare analysis for review. Available steps depend on your documents, role and model connection; skipped steps explain what is missing."));
+    controls.replaceChildren(el("div", { class: "row" }, tab("payment", "Payment workflow (7 agents)"), tab("diagnosis", "Diagnosis agents (9 agents)")), el("div", { class: "row af-picker" }, picker, demo, runBtn), scenarioExplanation, flow === "payment" ? inputPreview : "");
   }
   drawControls(); draw();
   main.replaceChildren(moduleFrame("AGENT WORKSPACE", "From input to a governed decision.", "Choose a scenario. Follow the workers. Review the result and its evidence.",
