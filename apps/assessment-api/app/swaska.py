@@ -39,6 +39,8 @@ class BedrockModelClient:
 
 def default_client() -> Optional[ModelClient]:
     from . import llm
+    if llm.provider() == "ollama":
+        return llm.OllamaModelClient()
     if llm.provider() == "openai":
         return llm.OpenAIModelClient()
     if llm.provider() == "vertex":

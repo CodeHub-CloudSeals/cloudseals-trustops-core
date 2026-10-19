@@ -11,3 +11,5 @@ google-cloud-storage>=2.18
 google-genai>=1.0
 google-cloud-kms>=3.0
 pypdf>=5.0
+
+langgraph==1.2.16

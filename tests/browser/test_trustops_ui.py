@@ -1,105 +1,42 @@
-import re
-import uuid
+import os
+from pathlib import Path
 
+import pytest
 from playwright.sync_api import expect
 
 
-def test_hub_strip_lists_the_packs_and_tools(as_user, assessment):
-    page = as_user("admin@t-bank", "trustops")
-    page.get_by_text("Explore available workflows & references", exact=True).click()
-    strip = page.locator(".pack-strip")
-    expect(strip).to_be_visible()
-    for name in ("LedgerSight AR / Cash", "AI governance diagnostic", "Framework library", "Agent Flow", "More workflow packs"):
-        expect(strip.get_by_text(name)).to_be_visible()
-    expect(strip.get_by_text("PLANNED")).to_be_visible()
-    strip.get_by_role("link", name=re.compile("AI governance diagnostic")).click()
-    expect(page.get_by_role("heading", name="Diagnostic studio")).to_be_visible()
-
-
-def test_low_value_run_shows_six_agent_trace_and_prepare_step(as_user):
-    page = as_user("admin@t-bank", "trustops")
-    page.wait_for_selector("#workflow-amount")
-    page.get_by_label("Receipt ID").fill(f"R-{uuid.uuid4().hex[:10]}")          # receipt IDs must be unique per tenant
-    page.get_by_role("button", name=re.compile("Run workflow")).click()
-    expect(page.get_by_text("Within policy", exact=True)).to_be_visible()
-    expect(page.locator(".trace-step")).to_have_count(6)
-    expect(page.locator(".trace-step", has_text="Cash Allocation")).to_contain_text("proposal was prepared")
-    expect(page.locator(".trace-step", has_text="Exception")).to_contain_text("within policy")          # no contradictory text
-    expect(page.get_by_role("button", name="Prepare action")).to_be_visible()
-
-
-def test_high_value_run_needs_a_different_person_to_approve(as_user, api):
-    page = as_user("admin@t-bank", "trustops")
-    page.wait_for_selector("#workflow-amount")
-    page.wait_for_timeout(500)                       # the form is rebuilt once the page data has loaded
-    page.get_by_label("Receipt ID").fill(f"R-{uuid.uuid4().hex[:10]}")
-    page.get_by_label("Received amount").fill("9999999")
-    page.get_by_label("Invoice amount").first.fill("9999999")
-    expect(page.get_by_label("Received amount")).to_have_value("9999999")
-    expect(page.get_by_label("Invoice amount").first).to_have_value("9999999")
-    page.get_by_role("button", name=re.compile("Run workflow")).click()
-    expect(page.locator("#trustops-detail")).to_contain_text("High value controller approval required")      # the run has finished
-    # the starter cannot approve their own run
-    own = as_user("admin@t-bank", "approvals")
-    expect(own.get_by_text("Controller role required").first).to_be_visible()
-    expect(own.get_by_role("button", name="Approve", exact=True)).to_have_count(0)
-    # a controller can: reason is mandatory
-    ctl = as_user("controller@t-bank", "approvals")
-    ctl.get_by_role("button", name="Approve", exact=True).first.click()
-    expect(ctl.locator("#toast")).to_have_text("Enter a decision reason")
-    pending = ctl.locator(".approval-card").count()
-    ctl.get_by_placeholder(re.compile("Decision reason")).first.fill("Verified against the remittance advice")
-    ctl.get_by_role("button", name="Approve", exact=True).first.click()
-    expect(ctl.locator("#toast")).to_contain_text("Approval approve recorded")
-    expect(ctl.locator(".approval-card")).to_have_count(pending - 1)
-
-
-def test_payment_agent_flow_shows_real_results_without_office_animation(as_user):
-    page = as_user("admin@t-bank", "agent-flow")
-    with page.expect_response(lambda r: r.url.endswith("/runs/stream") and r.request.method == "POST") as stream:
-        page.get_by_role("button", name="▶ Run agents").click()
-    assert stream.value.status == 200
-    assert "text/event-stream" in stream.value.headers["content-type"]
-    # Fast workers can finish before the first paint: do not require invented busy time.
-    expect(page.locator("main")).not_to_contain_text("NO AGENTS EXECUTED")
-    expect(page.locator(".af-result")).to_be_visible(timeout=60_000)
-    expect(page.locator(".af-node.is-done")).to_have_count(7)
-    expect(page.locator(".office-world-canvas")).to_have_count(0)
-    assert page.evaluate("document.querySelector('.af-progress-bar').style.width") == "100%"
-    assert page.errors == []
-
-
-def test_diagnosis_flow_skips_what_a_customer_may_not_do_and_says_why(as_user, assessment):
-    page = as_user("admin@t-bank", "agent-flow")
-    page.get_by_role("button", name=re.compile("Diagnosis agents")).click()
-    page.get_by_role("button", name="▶ Run agents").click()
-    expect(page.locator(".af-result, .af-node.is-skipped").first).to_be_visible(timeout=60_000)
-    expect(page.locator(".af-node", has_text="Findings Summary")).to_contain_text("Needs a CloudSeals reviewer", timeout=60_000)
-    expect(page.locator(".af-node", has_text="Interviewer")).to_have_class(re.compile("is-done"))
-    expect(page.locator(".af-node", has_text="Inventory Agent")).to_have_class(re.compile("is-done"))
-    expect(page.locator(".af-node", has_text="POC Drafter")).to_contain_text("CloudSeals assessor", timeout=60_000)
-
-
-def test_results_library_searches_real_workflow_receipts(as_user, api):
-    receipt = f"RESULT-{uuid.uuid4().hex[:10]}"
-    api("admin@t-bank", "POST", "/v1/workflows/ledgersight.ar_cash/runs", {
-        "receipt": {"receipt_id": receipt, "amount_minor": 25000, "currency": "USD", "reference": receipt},
-        "invoices": [{"invoice_id": receipt, "amount_minor": 25000, "currency": "USD", "reference": receipt}],
-        "remittance": {"reference": receipt},
-    })
-    page = as_user("admin@t-bank", "reports")
-    page.get_by_role("tab", name=re.compile("Workflow results")).click()
-    page.get_by_role("searchbox").fill(receipt)
-    expect(page.locator(".module-table tbody tr")).to_have_count(1)
-    expect(page.get_by_role("link", name="Open trace", exact=True)).to_be_visible()
-    page.get_by_role("searchbox").fill("no-such-receipt-" + uuid.uuid4().hex)
-    expect(page.get_by_text("No workflow results match your search.")).to_be_visible()
-    assert page.errors == []
-
-
-def test_customer_overview_fits_phone_width(as_user):
-    page = as_user("admin@t-bank", "dashboard", width=390, height=844)
+@pytest.mark.parametrize("route", ["trustops", "approvals", "reconciliation", "exceptions", "evidence", "shadow-roi", "readiness", "demo", "integrations", "datasets", "models", "workflows", "policies", "authority", "approval-matrix", "agentops"])
+def test_retired_navigation_opens_assessment_overview(as_user, route):
+    page = as_user("admin@t-bank", route)
     expect(page.get_by_role("heading", name="AI oversight. A clear next step.")).to_be_visible()
-    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    expect(page.get_by_role("link", name="Reports & results", exact=True)).to_have_count(1)
+    expect(page).to_have_url(page.url.split("#")[0] + "#/dashboard")
+    assert page.errors == []
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_customer_overview_is_assessment_focused(as_user, assessment, width):
+    page = as_user("admin@t-bank", "dashboard", width=width, height=900)
+    expect(page.get_by_role("heading", name="AI oversight. A clear next step.")).to_be_visible()
+    for name in ("Overview", "Assessments", "Assessment process", "Reports"):
+        expect(page.locator("#nav").get_by_role("link", name=name, exact=True)).to_be_visible()
+    expect(page.locator("main")).not_to_contain_text("Payment")
+    expect(page.locator("main")).not_to_contain_text("LedgerSight")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert page.errors == []
+    if os.environ.get("TRUSTOPS_UI_OUTPUT"):
+        output = Path(os.environ["TRUSTOPS_UI_OUTPUT"])
+        output.mkdir(parents=True, exist_ok=True)
+        page.screenshot(path=str(output / f"assessment-overview-{width}.png"), full_page=True, animations="disabled")
+
+
+def test_reports_do_not_fetch_or_offer_financial_workflows(as_user, assessment):
+    page = as_user("admin@t-bank", "dashboard")
+    expect(page.get_by_role("heading", name="AI oversight. A clear next step.")).to_be_visible()
+    requests = []
+    page.on("request", lambda r: requests.append(r.url))
+    page.locator("#nav").get_by_role("link", name="Reports", exact=True).click()
+    expect(page.get_by_role("heading", name="Reports", exact=True)).to_be_visible()
+    page.get_by_role("searchbox", name="Search reports").fill("no-such-system")
+    expect(page.get_by_role("tab", name="Workflow results")).to_have_count(0)
+    assert not any("/v1/runs" in u or "/v1/workflows" in u or "/v1/approvals" in u for u in requests)
     assert page.errors == []

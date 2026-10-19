@@ -6,9 +6,9 @@ from playwright.sync_api import expect
 
 def test_opens_directly_and_uses_the_light_theme_even_in_a_dark_browser(as_user):
     page = as_user(None, "", scheme="dark")
-    expect(page.get_by_role("heading", name="Command Center")).to_be_visible()
+    expect(page.get_by_role("heading", name="AI oversight. A clear next step.")).to_be_visible()
     assert page.get_by_role("button", name=re.compile(r"@t-bank|@t-health|@cloudseals")).count() == 0      # no seeded-user picker
-    assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(245, 248, 252)"
+    assert page.evaluate("getComputedStyle(document.body).backgroundColor") == "rgb(246, 248, 252)"
     assert page.errors == []
 
 
@@ -31,9 +31,12 @@ def test_no_horizontal_scroll(as_user, assessment, route, width):
 
 def test_full_width_layout_uses_the_window(as_user):
     page = as_user("admin@t-bank", "dashboard", width=2000)
-    page.wait_for_selector(".command-hero")
-    box = page.locator(".command-hero").bounding_box()
-    assert box["width"] > 1800
+    page.wait_for_selector(".overview-page .workspace-heading")
+    box = page.locator("main").bounding_box()
+    nav = page.locator("header.top").bounding_box()
+    assert abs(box["x"] - nav["width"]) <= 1
+    assert abs(box["width"] + nav["width"] - 2000) <= 1
+    assert page.locator(".overview-page .workspace-heading").bounding_box()["width"] >= 1200
 
 
 def test_stored_xss_is_rendered_as_text(as_user, api):
@@ -45,7 +48,7 @@ def test_stored_xss_is_rendered_as_text(as_user, api):
 
 def test_csp_blocks_injected_inline_script(as_user):
     page = as_user("admin@t-bank", "dashboard")
-    page.wait_for_selector(".command-hero")
+    page.wait_for_selector(".overview-page .workspace-heading")
     page.evaluate("""() => { const s = document.createElement('script'); s.textContent = 'window.__ran = 1'; document.body.append(s); }""")
     assert page.evaluate("window.__ran") is None
 
@@ -70,8 +73,8 @@ def test_staff_sees_staff_menus_and_customers_do_not(as_user):
 
 def test_sign_out_and_back(as_user):
     page = as_user("admin@t-bank", "dashboard")
-    expect(page.get_by_role("heading", name="Command Center")).to_be_visible()
+    expect(page.get_by_role("heading", name="AI oversight. A clear next step.")).to_be_visible()
     # dev mode has no sign-out button (single local workspace); an expired/invalid token returns to sign-in instead
     page.evaluate("sessionStorage.setItem('taad_token', 'x.invalid')")
     page.reload()
-    expect(page.get_by_role("heading", name="Command Center")).to_be_visible()   # dev login re-establishes a workspace
+    expect(page.get_by_role("heading", name="AI oversight. A clear next step.")).to_be_visible()   # dev login re-establishes a workspace

@@ -229,3 +229,22 @@ def test_inventory_requires_readable_clean_evidence(env, monkeypatch):
     r = c.post(f'/v1/assessments/{aid}/inventory/run', headers=h('admin@t-bank'), json={})
     assert r.status_code == 422 and r.json()['code'] == 'no_readable_documents'
     assert client.calls == []
+
+
+def test_inventory_never_sends_changed_source_bytes_to_model_or_clears_saved_work(env, monkeypatch):
+    import copy
+    c, h = env
+    aid = new_assessment(c, h, 'admin@t-bank')
+    eid = upload(c, h, aid, DOC.encode())
+    client = Fake({'use_cases': [uc()]})
+    monkeypatch.setattr(main, 'SWASKA_CLIENT', client)
+    root = f'/v1/assessments/{aid}'
+    good = c.post(root + '/inventory/run', headers=h('admin@t-bank'), json={})
+    assert good.status_code == 200
+    assert good.json()['use_cases'][0]['source_sha256'] == hashlib.sha256(DOC.encode()).hexdigest()
+    before = copy.deepcopy(main.STORE.inventory[aid]['use_cases'])
+    count = len(client.calls)
+    main.OBJECTS.put('t-bank', 'evidence', eid, b'Tampered document')
+    response = c.post(root + '/inventory/run', headers=h('admin@t-bank'), json={})
+    assert response.status_code == 409 and response.json()['code'] == 'source_integrity_failed'
+    assert len(client.calls) == count and main.STORE.inventory[aid]['use_cases'] == before

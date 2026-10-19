@@ -110,3 +110,17 @@ def test_agent_endpoints_are_rate_limited_per_user(env, monkeypatch):
     codes = [c.post(f"/v1/assessments/{aid}/agents/extraction", headers=h("admin@t-bank"), json={"evidence_id": eid}).status_code
              for _ in range(3)]
     assert codes == [200, 200, 429]
+
+
+def test_complete_registry_includes_each_manifest_once_and_separates_runtime_availability(env, monkeypatch):
+    from app import main, swaska, trustops_runtime
+    c, h = env
+    monkeypatch.setattr(main, 'SWASKA_CLIENT', None)
+    monkeypatch.setattr(main, 'runtime_enabled', lambda: False)
+    data = c.get('/v1/agents', headers=h('admin@t-bank')).json()
+    ids = [agent['agent_id'] for agent in data['catalog']]
+    assert len(ids) == len(set(ids)) == data['total'] == 17
+    assert set(ids) == set(taad_agents.AGENTS) | {swaska.MANIFEST['agent_id']} | {a['id'] for a in trustops_runtime.AGENT_MANIFESTS}
+    assert all(a['availability'] == 'Workflow unavailable' for a in data['catalog'] if a['group'] == 'payment')
+    assert next(a for a in data['catalog'] if a['agent_id'] == taad_agents.INVENTORY)['availability'] == 'Needs AI connection'
+    assert data['evidence_workflow']['available'] is True

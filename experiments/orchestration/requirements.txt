@@ -1,0 +1,4 @@
+# Evaluation only. Do not add these packages to the live API image without a separate integration decision.
+langgraph==1.2.16
+langgraph-checkpoint-sqlite==3.1.2
+crewai==1.15.28

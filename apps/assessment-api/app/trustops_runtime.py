@@ -17,7 +17,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from . import kms
+from . import kms, model_schemas
 
 ROOT = Path(__file__).resolve().parents[3]
 PACK = json.loads((ROOT / "packs/workflows/ledgersight.ar_cash/0.1.0.json").read_text())
@@ -68,6 +68,11 @@ class BedrockAgentModelClient:
 
 def configured_model_client() -> AgentModelClient | None:
     from . import llm
+    if llm.provider() == "ollama":
+        try:
+            return llm.OllamaModelClient()
+        except Exception as exc:
+            raise RuntimeErrorCode("agent_model_unavailable", "Self-hosted model client could not be initialized") from exc
     if llm.provider() == "openai":
         try:
             return llm.OpenAIModelClient()
@@ -100,7 +105,7 @@ def _agent_json(client: AgentModelClient, agent_id: str, task: str, source: dict
     user = (f"AGENT ID: {agent_id}\nTASK: {task}\n"
             f"<untrusted_source_json>{json.dumps(source, sort_keys=True, ensure_ascii=False)}</untrusted_source_json>")
     try:
-        raw = client.complete(system, user, max_tokens=max_tokens)
+        raw = model_schemas.complete(client, system, user, max_tokens, model_schemas.worker(agent_id, source))
     except Exception as exc:
         raise RuntimeErrorCode("agent_model_unavailable", f"{agent_id} model call failed") from exc
     try:
@@ -152,7 +157,10 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
 
     _progress(on_event, "agent.started", "ledgersight.match")
     match = _agent_json(client, "ledgersight.match",
-        "Rank only supplied invoice candidates. Return null if no candidate is supported. Cite only allowed field names.",
+        "Compare each candidate invoice directly with the receipt using amount_minor, currency and reference (use remittance.reference "
+        "when present). Invoice identifiers are opaque strings: every invoice_id literally supplied in candidate_invoices is valid, "
+        "including test identifiers. If exactly one candidate matches all three fields, return its supplied invoice_id, confidence 1.0 "
+        "and the supporting field names. Return null when no unique exact match is supported. Do not invent extra ID requirements.",
         {"receipt": receipt, "remittance": source["remittance"], "candidate_invoices": shortlist},
         {"selected_invoice_id", "confidence", "evidence_fields", "rationale"})
     selected = match["selected_invoice_id"]
@@ -249,7 +257,8 @@ def _run_model_agents(client: AgentModelClient, result: dict[str, Any], source: 
     for step, output in zip(result["agent_trace"], outputs):
         step["model"] = client.model_id
         step["recommendation"] = output
-    result["agent_mode"] = "vertex" if type(client).__name__ == "VertexModelClient" else "bedrock"
+    result["agent_mode"] = {"VertexModelClient": "vertex", "OpenAIModelClient": "openai",
+                            "OllamaModelClient": "ollama"}.get(type(client).__name__, "bedrock")
     result["model_id"] = client.model_id
 
 

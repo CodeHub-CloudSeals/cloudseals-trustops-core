@@ -75,10 +75,31 @@ def test_sign_in_screen_renders_and_starts_google_sign_in(page):
     page.on("pageerror", lambda e: errors.append(str(e)))
     page.goto(URL + "/")
     expect(page.get_by_role("heading", name="Sign in to your workspace")).to_be_visible()
-    expect(page.locator("body")).to_have_css("background-color", "rgb(245, 248, 252)")
+    expect(page.locator("body")).to_have_css("background-color", "rgb(246, 248, 252)")
     button = page.get_by_role("button", name=re.compile("Sign in with Google"))
     expect(button).to_be_enabled()
     expect(page.get_by_role("link", name=re.compile("Request workspace access"))).to_be_visible()
     with page.expect_navigation(url=re.compile(r"^https://accounts\.google\.com/")) as nav:
         button.click()
     assert "code_challenge_method=S256" in nav.value.url and "redirect_uri=" in nav.value.url and errors == []
+
+
+def test_website_inspection_requires_authentication_before_any_fetch():
+    request = urllib.request.Request(URL + '/v1/assessments/unassigned/website-inspection', method='POST',
+                                     headers={'Content-Type': 'application/json'},
+                                     data=json.dumps({'url': 'https://example.org/', 'authorized': True}).encode())
+    with pytest.raises(urllib.error.HTTPError) as error:
+        urllib.request.urlopen(request, timeout=20)
+    assert error.value.code == 401
+
+
+def test_portal_includes_the_url_inspection_form():
+    status, _, script = fetch('/portal/app.js')
+    assert status == 200 and b'Website URL' in script and b'Inspect website' in script
+    assert b'website-inspection' in script and b'Public HTML page and response metadata only' in script
+
+
+def test_retired_sample_report_points_to_the_actual_report_library():
+    status, _, body = fetch('/portal/sample-assessment-report.html')
+    assert status == 200 and b'url=./#/reports' in body
+    assert b'SYNTHETIC SAMPLE' not in body and b'Example Bank' not in body

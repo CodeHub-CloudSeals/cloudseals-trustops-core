@@ -95,3 +95,12 @@ def assessment(api):
             "file_size_bytes": len(DOC), "claimed_sha256": hashlib.sha256(DOC).hexdigest()})
     api("admin@t-bank", "PUT", g["upload_url"], raw=DOC)
     return aid
+
+
+@pytest.fixture(scope="session")
+def browser(playwright, browser_type, browser_type_launch_args):
+    """Opt into an explicitly started dedicated Chrome; otherwise preserve normal Playwright launch."""
+    cdp = os.environ.get("TRUSTOPS_TEST_CDP")
+    instance = playwright.chromium.connect_over_cdp(cdp) if cdp else browser_type.launch(**browser_type_launch_args)
+    yield instance
+    instance.close()

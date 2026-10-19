@@ -7,7 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'apps' / 'assessment-api'))
 
-from app import llm, swaska
+from app import llm, model_schemas, swaska
 
 
 def main():
@@ -17,7 +17,7 @@ def main():
         client = swaska.default_client()
         if client is None:
             raise ValueError('No model provider configured')
-        raw = client.complete('Return exactly the JSON object {"ok":true}.', 'Synthetic connection check. No customer data.', max_tokens=128)
+        raw = model_schemas.complete(client, 'Return exactly the JSON object {"ok":true}.', 'Synthetic connection check. No customer data.', 256, model_schemas.READY)
         if json.loads(raw) != {'ok': True}:
             raise ValueError('Unexpected probe result')
         result['live_verified'] = True

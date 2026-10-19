@@ -48,7 +48,7 @@ def test_assessment_and_studio_pages_have_accessible_names(as_user, assessment):
 
 def test_focus_moves_to_the_content_on_navigation_and_the_skip_link_exists(as_user):
     page = as_user("admin@t-bank", "dashboard")
-    page.wait_for_selector(".command-hero")
+    page.wait_for_selector(".overview-page .workspace-heading")
     assert page.evaluate("document.activeElement.id") == "main"                       # a screen reader starts at the new page content
     assert page.evaluate("document.querySelector('a.skip').getAttribute('href')") == "#main"
     page.keyboard.press("Tab")

@@ -13,6 +13,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Optional
 
+from . import model_schemas
 from .swaska import INJECTION, ModelClient
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -92,8 +93,8 @@ def _uid(prefix: str, *parts: str) -> str:
     return prefix + hashlib.sha256("|".join(parts).encode()).hexdigest()[:10]
 
 
-def _ask(client: ModelClient, system: str, user: str, max_tokens: int) -> Any:
-    return json.loads(client.complete(system, user, max_tokens=max_tokens))
+def _ask(client: ModelClient, system: str, user: str, max_tokens: int, schema) -> Any:
+    return json.loads(model_schemas.complete(client, system, user, max_tokens, schema))
 
 
 # ---------------- agent: AI use-case inventory ----------------
@@ -121,7 +122,7 @@ def run_inventory(client: Optional[ModelClient], docs: list[dict]) -> dict:
         before_items, before_rejected = len(items), rejected
         text = doc["text"]
         try:
-            raw = _ask(client, INVENTORY_SYSTEM, f"<untrusted filename={json.dumps(doc['filename'])}>{text}</untrusted>", 6000)
+            raw = _ask(client, INVENTORY_SYSTEM, f"<untrusted filename={json.dumps(doc['filename'])}>{text}</untrusted>", 6000, model_schemas.INVENTORY)
             candidates = raw["use_cases"]
             if not isinstance(candidates, list):
                 raise ValueError("use_cases")
@@ -197,7 +198,7 @@ def run_gap_analysis(client: Optional[ModelClient], framework_id: str, use_cases
     user = f"{framework_prompt(framework_id)}\n<untrusted>{json.dumps(slim, ensure_ascii=False)}</untrusted>"
     items, rejected = [], 0
     try:
-        findings = _ask(client, GAP_SYSTEM, user, 8000)["findings"]
+        findings = _ask(client, GAP_SYSTEM, user, 8000, model_schemas.gaps(fw["valid_ids"], ids))["findings"]
         if not isinstance(findings, list):
             raise ValueError("findings")
     except Exception:

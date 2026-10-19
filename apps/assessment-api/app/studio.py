@@ -14,6 +14,7 @@ import re
 import time
 from typing import Any, Optional
 
+from . import model_schemas
 from .swaska import ModelClient
 from .use_cases import FRAMEWORKS, _clean, _uid
 
@@ -24,8 +25,9 @@ COSTS = ("low", "medium", "high")
 SEV_ORDER = ("critical", "high", "medium", "low", "info")
 
 
-def _ask(client: ModelClient, system: str, user: str, max_tokens: int) -> Any:
-    return json.loads(client.complete(system, user, max_tokens=max_tokens))
+def _ask(client: ModelClient, system: str, user: str, max_tokens: int, schema=None) -> Any:
+    raw = model_schemas.complete(client, system, user, max_tokens, schema) if schema else client.complete(system, user, max_tokens=max_tokens)
+    return json.loads(raw)
 
 
 def _unavailable(extra: dict) -> dict:
@@ -54,7 +56,7 @@ def run_maturity(client: Optional[ModelClient], use_cases: list[dict], gaps: lis
                                                   "decision_authority", "data_sources", "business_owner", "technical_owner")} for u in use_cases],
             "gaps": [{k: g.get(k) for k in ("gap_id", "framework_id", "framework_clause", "title", "severity", "description")} for g in gaps]}
     try:
-        raw = _ask(client, MATURITY_SYSTEM, f"<untrusted>{json.dumps(data, ensure_ascii=False)}</untrusted>", 6000)
+        raw = _ask(client, MATURITY_SYSTEM, f"<untrusted>{json.dumps(data, ensure_ascii=False)}</untrusted>", 6000, model_schemas.maturity(PRINCIPLES, ids))
         scores, rationale, refs = raw["scores"], raw["rationale"], raw.get("evidence_refs") or {}
         if set(scores) != set(PRINCIPLES) or set(rationale) != set(PRINCIPLES):
             raise ValueError("principles")
@@ -115,7 +117,7 @@ def run_roadmap(client: Optional[ModelClient], gaps: list[dict], maturity: Optio
                                             "estimated_effort_days")} for g in gaps],
             "maturity": {k: maturity[k] for k in ("scores", "overall_score", "improvement_priorities")} if maturity else None}
     try:
-        raw = _ask(client, ROADMAP_SYSTEM, f"<untrusted>{json.dumps(data, ensure_ascii=False)}</untrusted>", 8000)
+        raw = _ask(client, ROADMAP_SYSTEM, f"<untrusted>{json.dumps(data, ensure_ascii=False)}</untrusted>", 8000, model_schemas.roadmap(gap_by_id, FRAMEWORKS))
         raw_items = raw["roadmap_items"]
         if not isinstance(raw_items, list):
             raise ValueError("items")

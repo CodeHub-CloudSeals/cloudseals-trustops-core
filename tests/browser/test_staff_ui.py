@@ -77,9 +77,11 @@ def test_audit_logs_filter_page_and_export(as_user, api, assessment, tmp_path):
     page = as_user("architect@cloudseals", "activity")
     expect(page.locator("tbody tr").first).to_be_visible()
     expect(page.locator(".case-filters .chip", has_text="case")).to_be_visible()
-    page.locator(".case-filters .chip", has_text=re.compile(r"^case")).click()
-    expect(page.locator(".audit-action").first).to_contain_text("case.")
-    assert all(a.startswith("case.") for a in page.locator(".audit-action").all_inner_texts())
+    with page.expect_response(lambda response: '/v1/admin/activity?' in response.url and 'action=case.' in response.url) as filtered:
+        page.locator(".case-filters .chip", has_text=re.compile(r"^case")).click()
+    count = len(filtered.value.json()['items'])
+    assert count > 0
+    expect(page.locator(".audit-action")).to_have_text([re.compile(r"^case\.")] * count)
     page.get_by_placeholder("Search action, reference or person").fill("zzz-no-such-event")
     page.get_by_placeholder("Search action, reference or person").press("Enter")
     expect(page.get_by_text("No events match these filters.")).to_be_visible()
@@ -93,7 +95,7 @@ def test_audit_logs_filter_page_and_export(as_user, api, assessment, tmp_path):
 
 def test_service_health_page_and_live_checks(as_user):
     page = as_user("architect@cloudseals", "service-health")
-    for card in ("Service", "Application state", "Evidence storage", "Malware scanning", "AI model", "Evidence signing", "Workflow runtime", "Agents, last 24 hours", "Records"):
+    for card in ("Service", "Application state", "Evidence storage", "Malware scanning", "AI model", "Evidence signing", "Agents, last 24 hours", "Records"):
         expect(page.locator(".health-card h3", has_text=card).first).to_be_visible()
     expect(page.locator(".health-card", has_text="AI model")).to_contain_text("none (deterministic agents only)")
     page.get_by_role("button", name="Run live checks").click()
@@ -101,15 +103,11 @@ def test_service_health_page_and_live_checks(as_user):
     assert page.errors == []
 
 
-def test_customer_workspaces_are_read_only_for_staff(as_user, api):
-    api("admin@t-bank", "POST", "/v1/workflows/ledgersight.ar_cash/runs",
-        {"receipt": {"receipt_id": f"R-{uuid.uuid4().hex[:8]}", "amount_minor": 999999999, "currency": "USD", "reference": "INV-1"},
-         "invoices": [{"invoice_id": "I-1", "amount_minor": 999999999, "currency": "USD", "reference": "INV-1"}], "remittance": {"reference": "INV-1"}})
+def test_customer_workspaces_are_read_only_for_staff(as_user, assessment):
     page = as_user("reviewer@cloudseals", "workspaces")
     page.get_by_role("link", name=re.compile("Demo Bank")).click()
-    expect(page.get_by_text("Read-only view for CloudSeals staff")).to_be_visible()
-    expect(page.get_by_role("heading", name=re.compile("waiting for a customer controller"))).to_be_visible()
-    expect(page.get_by_role("button", name="Approve", exact=True)).to_have_count(0)               # staff cannot approve in the customer's place
-    page.get_by_role("link", name="Open run →").first.click()
-    expect(page.get_by_role("heading", name=re.compile("R-"))).to_be_visible()
+    expect(page.get_by_text("Read-only assessment view for CloudSeals staff.", exact=False)).to_be_visible()
+    expect(page.get_by_role("heading", name=re.compile(r"^\d+ assessments?$")).first).to_be_visible()
+    expect(page.get_by_role("link", name="Open run →")).to_have_count(0)
     expect(page.get_by_role("button", name="Approve", exact=True)).to_have_count(0)
+    assert page.errors == []

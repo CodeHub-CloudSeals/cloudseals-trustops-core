@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import secrets
+import sys
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ from pydantic import BaseModel, Field
 from question_engine import candidate_findings, eligible_questions, load_registry
 from question_engine.branching import is_eligible
 
-from . import llm, persist, scanner, studio, swaska, taad_agents, trustops_runtime, use_cases
+from . import application_evidence, llm, model_schemas, persist, scanner, studio, swaska, taad_agents, trustops_runtime, use_cases
 from .evidence import inspect, make_store
 from .security import AUTH_MODE, AUTH_PROVIDER, CLOUDSEALS_ROLES, ENV, issue_token, verify_identity
 from .store import Store
@@ -39,6 +40,30 @@ async def lifespan(_app: FastAPI):
     if ENV == "local" and AUTH_MODE == "dev" and os.environ.get("TAAD_SEED") == "1" and not STORE.users:
         from .seed import seed
         seed()
+    if os.environ.get("TAAD_MODEL_STARTUP_CHECK") == "1":
+        # Explicit self-host deployment gate: use synthetic text only; never publish or mutate customer material.
+        if SWASKA_CLIENT is None:
+            raise RuntimeError("Model startup check requires a configured provider")
+        stage = 'json_connection'
+        analysis_check = {}
+        try:
+            reply = json.loads(model_schemas.complete(SWASKA_CLIENT, 'Return exactly the JSON object {"ok":true}.',
+                                                     "Synthetic server readiness check. No customer data.", 128, model_schemas.READY))
+            if reply != {"ok": True}:
+                raise ValueError("Invalid model readiness reply")
+            if os.environ.get("TAAD_MODEL_DOCUMENT_CHECK") == "1":
+                stage = 'document_inventory'
+                result = use_cases.run_inventory(SWASKA_CLIENT, [{"evidence_id": "startup-synthetic", "filename": "synthetic-ai-register.txt",
+                    "text": "The customer support chatbot answers account FAQs. Support owns the chatbot. It cannot change accounts."}])
+                analysis_check = {'status': result.get('status'), 'accepted': len(result.get('items', [])), 'rejected': result.get('rejected')}
+                if result.get("status") != "completed" or not result["items"]:
+                    raise ValueError("Synthetic document analysis did not pass grounding checks")
+        except Exception as exc:
+            print(json.dumps({'event': 'MODEL_STARTUP_FAILED', 'stage': stage, 'error_type': type(exc).__name__,
+                              'analysis_check': analysis_check}), flush=True)
+            raise RuntimeError("Model startup verification failed; no customer data was used") from None
+        print(f"MODEL_STARTUP_VERIFIED provider={llm.provider()} model={llm.configured_model_id()} "
+              f"document_check={os.environ.get('TAAD_MODEL_DOCUMENT_CHECK') == '1'}", flush=True)
     yield
 
 
@@ -591,6 +616,13 @@ def report_library(assessment_id: Optional[str] = None, p: Principal = Depends(p
                 items.append({"kind": "document_diagnostic", "assessment_id": aid, "ai_system_name": r["system_name"], "industry": a["industry"],
                               "report_id": r["report_id"], "version": r["version"], "status": "published", "published_at": r["published_at"],
                               "download_urls": {"html": f"/v1/assessments/{aid}/diagnostic-report?report_id={r['report_id']}"}})
+        for aid, a in visible.items():
+            for run in STORE.inventory.get(aid, {}).get("technical_runs", {}).values():
+                for release in run.get("releases", []):
+                    items.append({"kind": "application_evidence", "assessment_id": aid, "ai_system_name": a["ai_system_name"],
+                                  "industry": a["industry"], "report_id": release["report_id"], "version": release["version"],
+                                  "status": "published", "published_at": release["published_at"],
+                                  "download_urls": {"html": f"/v1/assessments/{aid}/application-evidence/{run['run_id']}/report"}})
     items.sort(key=lambda r: (r.get("published_at", 0), r["version"], r["report_id"]), reverse=True)
     return {"items": items, "total": len(items)}
 
@@ -719,7 +751,32 @@ STAFF_REVIEW = ("cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer"
 
 @app.get("/v1/agents")
 def agent_registry(p: Principal = Depends(principal)):
-    return {"items": [{k: v for k, v in a.items() if k != "behavior_policy"} for a in taad_agents.AGENTS.values()],
+    items = [{k: v for k, v in a.items() if k != "behavior_policy"} for a in taad_agents.AGENTS.values()]
+    model_ready = SWASKA_CLIENT is not None
+    diagnostic_ids = {taad_agents.INVENTORY, taad_agents.GAP, taad_agents.MATURITY,
+                      taad_agents.ROADMAP, taad_agents.REPORT, taad_agents.OVERLAY}
+    catalog = [{"agent_id": swaska.MANIFEST["agent_id"], "group": "assessment", "name": "Assessment interviewer",
+                "purpose": swaska.MANIFEST["purpose"], "availability": "AI configured" if model_ready else "Guided question help",
+                "authority": "Explains questions and requests evidence; does not save answers or approve reports."}]
+    names = {taad_agents.INVENTORY: "AI inventory", taad_agents.GAP: "Gap analysis", taad_agents.MATURITY: "Maturity assessment",
+             taad_agents.ROADMAP: "Remediation roadmap", taad_agents.REPORT: "Report narrative", taad_agents.OVERLAY: "Architecture review",
+             taad_agents.EXTRACTION: "Evidence answers", taad_agents.FINDINGS: "Findings summary",
+             taad_agents.DRAFTER: "POC scope assistant", taad_agents.APPROVAL: "Approval summary"}
+    for agent in items:
+        diagnostic = agent['agent_id'] in diagnostic_ids
+        catalog.append({"agent_id": agent['agent_id'], "group": "assessment" if diagnostic else "assistant",
+                        "name": names[agent['agent_id']], "purpose": agent['purpose'],
+                        "availability": "AI configured" if model_ready else "Needs AI connection" if diagnostic else "Rule-based assistance",
+                        "authority": "Draft for reviewer validation; cannot publish or approve." if diagnostic else
+                                     "Suggestions only; a person checks and applies the result."})
+    for agent in trustops_runtime.AGENT_MANIFESTS:
+        catalog.append({"agent_id": agent['id'], "group": "payment", "name": agent['id'].split('.')[-1].replace('_', ' ').title(),
+                        "purpose": agent['purpose'], "availability": ("AI + policy rules" if llm.provider() else "Policy rules")
+                        if runtime_enabled() else "Workflow unavailable", "authority": " · ".join(agent['authority'])})
+    return {"items": items, "catalog": catalog, "total": len(catalog),
+            "evidence_workflow": {"name": "Application evidence", "available": True,
+                                  "description": "Browser capture → evidence checks → reviewer validation → published report. "
+                                                 "Metadata checks do not prove AI safety."},
             "behavior_policy": taad_agents.CATALOG["common_behavior_policy"]}
 
 
@@ -843,8 +900,15 @@ def run_inventory(aid: str, body: InventoryRunRequest, p: Principal = Depends(pr
     docs, skipped = [], []
     for e in ev[:use_cases.MAX_DOCS]:
         try:
-            docs.append({"evidence_id": e["evidence_id"], "filename": e["filename"], "text": use_cases.extract_text(
-                e["content_type"], OBJECTS.get(a["tenant_id"], "evidence", e["evidence_id"]))})
+            data = OBJECTS.get(a["tenant_id"], "evidence", e["evidence_id"])
+        except Exception:
+            skipped.append(e["filename"])
+            continue
+        if hashlib.sha256(data).hexdigest() != e['sha256']:
+            raise err(409, 'source_integrity_failed', 'An evidence file changed after upload. Upload and review a new copy; existing analysis is unchanged.')
+        try:
+            docs.append({"evidence_id": e["evidence_id"], "filename": e["filename"], "source_sha256": e['sha256'],
+                         "text": use_cases.extract_text(e["content_type"], data)})
         except Exception:
             skipped.append(e["filename"])
     readable = [d for d in docs if d["text"].strip()]
@@ -852,6 +916,9 @@ def run_inventory(aid: str, body: InventoryRunRequest, p: Principal = Depends(pr
         raise err(422, "no_readable_documents", "Upload a clean supported document containing readable text before running analysis.")
     result = use_cases.run_inventory(SWASKA_CLIENT, readable)
     require_analysis_result(result)
+    source_hashes = {d['evidence_id']: d['source_sha256'] for d in readable}
+    for item in result['items']:
+        item['source_sha256'] = source_hashes[item['evidence_id']]
     with STORE.lock:
         inv = _inv(aid)
         ran = set(result["successful_document_ids"])
@@ -1023,7 +1090,10 @@ def review_overlay(aid: str, body: ReviewItem, p: Principal = Depends(principal)
 
 def _diagnostic_material(inv: dict) -> dict:
     """Copy reviewed inputs so a customer release cannot change when working material changes."""
-    return copy.deepcopy({"use_cases": [u for u in inv["use_cases"] if u["status"] == "VALIDATED"],
+    reviewed = [u for u in inv['use_cases'] if u['status'] == 'VALIDATED']
+    sources = [{'evidence_id': eid, 'sha256': STORE.evidence.get(eid, {}).get('sha256')}
+               for eid in sorted({u['evidence_id'] for u in reviewed})]
+    return copy.deepcopy({"use_cases": reviewed, 'source_evidence': sources,
                           "gaps": [g for g in inv["gaps"] if g["status"] == "VALIDATED"],
                           "maturity": inv["maturity"] if inv["maturity"] and inv["maturity"]["status"] == "VALIDATED" else None,
                           "roadmap": [i for i in inv["roadmap"] if i["status"] == "VALIDATED"],
@@ -1060,6 +1130,16 @@ def _publication_blockers(aid: str, material: dict) -> list[str]:
         ev = STORE.evidence.get(u["evidence_id"])
         if not ev or ev["assessment_id"] != aid or ev["state"] != "clean":
             missing.append(f"clean source evidence required for {u['name']}")
+            continue
+        if u.get('source_sha256', ev['sha256']) != ev['sha256']:
+            missing.append(f"source version changed for {u['name']}; analyse and review a new upload")
+            continue
+        try:
+            source_bytes = OBJECTS.get(ev['tenant_id'], 'evidence', ev['evidence_id'])
+            if hashlib.sha256(source_bytes).hexdigest() != ev['sha256']:
+                missing.append(f"source integrity check failed for {u['name']}")
+        except Exception:
+            missing.append(f"original source unavailable for {u['name']}")
     if any(not set(g["evidence_use_case_ids"]) <= uids for g in material["gaps"]):
         missing.append("a validated gap cites a use case that is no longer validated")
     mat = material["maturity"]
@@ -2225,6 +2305,9 @@ async def google_token_exchange(request: Request):
 @app.get("/", include_in_schema=False)
 def root():
     return Response(status_code=302, headers={"Location": "/portal/"})
+
+
+application_evidence.register_routes(app, sys.modules[__name__])
 
 
 if _portal.is_dir():

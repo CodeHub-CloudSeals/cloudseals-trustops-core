@@ -190,3 +190,22 @@ def test_report_library_lists_both_published_types_without_leaking_drafts_or_oth
     assert pdf.status_code == 200 and pdf.content.startswith(b'%PDF')
     word = c.get(questionnaire['download_urls']['docx'], headers=h('admin@t-bank'))
     assert word.status_code == 200 and word.content.startswith(b'PK')
+
+
+@pytest.mark.parametrize('change', ['bytes', 'metadata', 'unavailable'])
+def test_publication_rechecks_original_source_integrity(reviewed, monkeypatch, change):
+    c, h, aid, uid, *_ = reviewed
+    uc_record = main.STORE.inventory[aid]['use_cases'][0]
+    evidence = main.STORE.evidence[uc_record['evidence_id']]
+    original_preview = preview(c, h, aid)
+    assert original_preview['source_digest']
+    if change == 'bytes':
+        main.OBJECTS.put(evidence['tenant_id'], 'evidence', evidence['evidence_id'], b'Changed source bytes')
+    elif change == 'metadata':
+        evidence['sha256'] = '0' * 64
+    else:
+        monkeypatch.setattr(main.OBJECTS, 'get', lambda *_: (_ for _ in ()).throw(FileNotFoundError()))
+    response = publish(c, h, aid)
+    assert response.status_code == 409
+    assert main.STORE.inventory[aid]['published_diagnostics'] == []
+    assert main.STORE.inventory[aid]['use_cases'][0]['status'] == 'VALIDATED'
