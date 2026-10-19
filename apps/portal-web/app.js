@@ -250,8 +250,12 @@ function assessmentGuide(canCreate = false) {
 routes.assessments = async () => {
   const { items } = await api("/v1/assessments");
   const canCreate = !state.me.is_staff && state.me.roles.some((r) => ["customer_admin", "customer_architect"].includes(r));
+  const canStartCase = state.me.roles.some((r) => ["cloudseals_admin", "cloudseals_assessor"].includes(r));
+  const startAction = canCreate
+    ? el("a", { class: "btn", href: "#new-assessment", onclick: (e) => { e.preventDefault(); form.scrollIntoView({ behavior: "smooth", block: "center" }); $("#nm", form).focus({ preventScroll: true }); } }, "+ New assessment")
+    : canStartCase ? el("a", { class: "btn", href: "#/cases" }, "+ Start customer case") : "";
   const rows = items.map((a) => el("tr", {}, el("td", {}, el("a", { href: `#/assessment/${a.assessment_id}` }, a.ai_system_name)), el("td", {}, a.industry), el("td", {}, el("span", { class: `tag ${a.status === "In progress" ? "medium" : "ok"}` }, a.status)), el("td", {}, a.questionnaire_version)));
-  const form = el("form", { class: "module-panel assessment-create-form", onsubmit: safe(async (e) => {
+  const form = el("form", { id: "assessment-create-form", class: "module-panel assessment-create-form", onsubmit: safe(async (e) => {
     e.preventDefault(); const f = new FormData(e.target);
     const a = await api("/v1/assessments", { method: "POST", idem: true, body: { ai_system_name: f.get("name"), industry: f.get("industry"), questionnaire_version: "1.0.0" } });
     go(`#/assessment/${a.assessment_id}`);
@@ -262,8 +266,12 @@ routes.assessments = async () => {
   main.replaceChildren(moduleFrame("YOUR WORKSPACE", "AI assessments", "Describe your AI system, share evidence and track your reviewed report.",
     el("details",{class:"module-panel"},el("summary",{},"What should I upload? See examples"),assessmentGuide(canCreate)),
     el("section", { class: "module-metrics compact" }, [["Assessments", items.length], ["In progress", items.filter((a) => a.status === "In progress").length], ["Submitted", items.filter((a) => a.status !== "In progress").length]].map(([label, value]) => el("article", {}, el("span", {}, label), el("strong", {}, String(value))))),
+    !canCreate && state.me.is_staff ? el("section", { class: "assessment-start-note", "aria-label": "How CloudSeals staff start a customer assessment" },
+      el("div", {}, el("strong", {}, canStartCase ? "Starting an assessment for a customer?" : "Need to start a customer assessment?"),
+        el("p", {}, canStartCase ? "Open a customer case first. The customer then creates the assessment in their own workspace, keeping their answers and evidence in the right account." : "A CloudSeals assessor or administrator can open the customer case. The customer creates the assessment in their own workspace.")),
+      canStartCase ? el("a", { class: "btn", href: "#/cases" }, "Go to Cases →") : "") : "",
     canCreate ? form : "",
-    el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "YOUR WORKSPACE"), el("h3", {}, "Assessments"))),
+    el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading assessment-list-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "YOUR WORKSPACE"), el("h3", {}, "Assessments")), startAction),
       rows.length ? el("div", { class: "table-wrap" }, el("table", { class: "module-table" }, el("thead", {}, el("tr", {}, ["AI system", "Industry", "Status", "Questionnaire"].map((h) => el("th", { scope: "col" }, h)))), el("tbody", {}, rows)))
         : el("div", { class: "empty-state" }, canCreate ? "Start by creating an assessment for an AI system." : "No assessments have been assigned to this workspace."))));
 };
