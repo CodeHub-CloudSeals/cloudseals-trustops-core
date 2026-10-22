@@ -2,14 +2,14 @@
 
 > **Status:** live in the DEV environment profile at <https://trustops.cloudseals.com> (GCP project `trustops-uat`, Cloud Run, europe-west1). Not production-ready yet; see [Known limits](#known-limits).
 
-TrustOps helps CloudSeals and its customers **find out how safely their AI systems are built and run, fix what is wrong, and then run AI workflows under control, with proof of every decision.**
+TrustOps helps CloudSeals and its customers assess AI systems with evidence, review potential gaps, and run bounded workflows under policy and human authority.
 
 It has two halves that share one web app, one API and one audit trail:
 
 | Half | What it does | Who uses it |
 |---|---|---|
 | **TAAD** (Architecture Diagnosis) | Reads a customer's documents and questionnaire answers, lists their AI use cases, compares them with regulatory frameworks, scores governance maturity, plans the remediation and produces a report. Every AI-produced item is a *draft* until a CloudSeals reviewer validates it. | Customers (answer and upload), CloudSeals reviewers and architects (validate and deliver) |
-| **TrustOps Core runtime** | Runs governed agent workflows (today: LedgerSight AR / Cash, a payment-matching workflow) where agents may only *recommend*, a deterministic policy gate decides, a *different* person must approve high-value actions, and every step is recorded in a tamper-evident, signed evidence chain. | Customer finance and risk teams |
+| **TrustOps Core runtime** | The local LedgerSight AR / Cash sandbox demonstrates bounded recommendations, deterministic policy, maker-checker approval, mock execution and local hash-chain verification. | Customer finance and risk teams |
 
 Nothing the AI produces is ever saved as an answer, approval, finding or published report by itself.
 
@@ -40,7 +40,7 @@ Nothing the AI produces is ever saved as an answer, approval, finding or publish
 | **Diagnosis** | The versioned questionnaire (318 questions, adapts to industry and AI type), evidence upload, submit, reviewed reports. |
 | **Use cases** (*Diagnostic studio*) | Documents → AI use cases → framework gaps → maturity → roadmap → architecture → report. Reviewers validate each step. |
 | **Cases** (staff) | One case per customer engagement: assigned architects, linked assessments and documents, status history, activity. A case can only be *delivered* when a linked assessment has a FINAL report. |
-| **TrustOps** | Governed workflows (LedgerSight AR / Cash) with the six-agent trace, policy decision, approval and sandbox execution. Hub strip links to every other tool. |
+| **LedgerSight POC** | A focused sandbox walkthrough of receipt matching, the six-step trace, policy decision, controller approval, mock execution and evidence verification. |
 | **Agent Flow** | Press Run and watch the agents hand work to each other, step by step, with their real output. |
 | **Approvals** | Customer controllers approve or reject high-value runs (maker-checker). |
 | **Frameworks** | Read-only library: EU AI Act, ISO 42001, NIST AI RMF, SR 11-7, FDA SaMD (80 requirements, 183 controls, *pending legal review*). |
@@ -149,6 +149,8 @@ docs/                         deployment, security, runtime and goal documents
 ```
 
 ## Run it locally
+
+The CEO-handoff-aligned 10–15 minute customer walkthrough is documented in [docs/CLIENT_DEMO_PLAYBOOK.md](docs/CLIENT_DEMO_PLAYBOOK.md). It uses synthetic inputs and `mock_sap`; it does not demonstrate a real bank or ERP integration.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt

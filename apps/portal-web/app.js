@@ -2,7 +2,6 @@
 const $ = (s, r = document) => r.querySelector(s);
 const main = $("#main"), nav = $("#nav"), who = $("#who"), contextBar = $("#contextBar");
 const state = { token: sessionStorage.getItem("taad_token"), me: null, cfg: { mode: "oidc", oidc: {} } };
-
 function el(tag, attrs = {}, ...kids) {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -13,6 +12,9 @@ function el(tag, attrs = {}, ...kids) {
   }
   for (const c of kids.flat()) n.append(c instanceof Node ? c : document.createTextNode(c ?? ""));
   return n;
+}
+function displayAISystemName(name) {
+  return String(name || "").replace(/^\s*(?:DEMO\s*\|\s*|SYNTHETIC SAMPLE\s*[—–-]\s*)/i, "");
 }
 const say = (m) => { $("#live").textContent = m; };
 function tenantLabel(tenant) {
@@ -165,7 +167,7 @@ async function render() {
   const canUseCases = hasAnyRole("cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer");
   const canUseAdminMetrics = hasAnyRole("cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor");
   const [, name, arg] = (location.hash || "#/dashboard").split("/");
-  const navIcons = { dashboard: "◫", assessments: "▤", "use-cases": "◇", trustops: "⇄", "agent-flow": "◎", reports: "▥", approvals: "✓", demo: "▷", queue: "▣" };
+  const navIcons = { dashboard: "🏠", assessments: "📋", "use-cases": "◇", trustops: "⇄", "agent-flow": "◎", reports: "📊", approvals: "✓", demo: "▷", queue: "▣", "ledger-sight": "🔄" };
   const activeRoute = name === "assessment" ? "assessments" : name;
   const link = ([route, label]) => el("a", { href: `#/${route}`, class: "module-menu-link", "aria-current": activeRoute === route ? "page" : null }, el("span", { class: "nav-icon", "aria-hidden": "true" }, navIcons[route] || "·"), label);
   const group = (label, items) => el("details", { class: "module-menu-group", open: label === "Resources" && items.some(([route]) => route === activeRoute) }, el("summary", {}, label, el("span", { "aria-hidden": "true" }, "⌄")),
@@ -179,21 +181,23 @@ async function render() {
   ];
   nav.replaceChildren(
     el("span", { class: "nav-section-label" }, "WORKSPACE"),
-    link(["dashboard", "Overview"]), link(["assessments", "Assessments"]), link(["agent-flow", "Assessment process"]),
-    link(["reports", "Reports"]),
+    link(["dashboard", "Overview"]), link(["assessments", "Assessments"]), link(["reports", "Reports"]),
+    ...((state.me.is_staff || state.me.tenant?.industry === "banking" || state.me.tenant?.tenant_id === "t-bank") && roles.some((r) => ["customer_admin", "customer_architect", "customer_risk", "customer_controller", "cloudseals_assessor", "cloudseals_admin"].includes(r))
+      ? [link(["ledger-sight", "LedgerSight POC"])] : []),
     ...(canUseAdminMetrics ? [el("span", { class: "nav-section-label" }, "REVIEW"), ...(canUseCases ? [link(["cases", "Cases"])] : []), link(["queue", "Review queue"])] : []),
-    group("Resources", [["agents", "Assessment team"], ["frameworks", "Frameworks"], ...(staff ? [] : [["team", "Team"]])]),
+    staff ? group("Resources", [["agent-flow", "Assessment process"], ["agents", "Assessment team"], ["frameworks", "Frameworks"]]) : "",
     staff ? group("Administration", adminItems) : "");
   who.replaceChildren(state.cfg.mode === "dev"
     ? el("span", { class: "tag" }, state.me.tenant ? `${tenantLabel(state.me.tenant)} workspace` : "CloudSeals staff")
     : `${state.me.sub} `, state.cfg.mode === "dev" ? "" : el("button", { class: "secondary", onclick: logout }, "Sign out"));
   contextBar.replaceChildren(
-    el("div", { class: "workspace-breadcrumb" }, el("span", {}, "Workspace"), el("span", { "aria-hidden": "true" }, "/"), el("strong", {}, ({dashboard:"Overview",assessments:"Assessments",assessment:"Assessment", "agent-flow":"Assessment process",trustops:"Overview",agents:"Assessment team",reports:"Reports",demo:"Demo Studio"})[name] || name.replaceAll("-", " "))),
-    el("div", { class: "workspace-context-actions" }, el("span", { class: "workspace-session" }, state.cfg.mode === "dev" ? "Local workspace" : "Secure session"), el("span", { class: "workspace-avatar", "aria-hidden": "true" }, tenantLabel(state.me.tenant).slice(0,1))));
+    el("div", { class: "workspace-breadcrumb" }, el("span", {}, "Workspace"), el("span", { "aria-hidden": "true" }, "/"), el("strong", {}, ({dashboard:"Overview",assessments:"Assessments",assessment:"Assessment", "agent-flow":"Assessment process",trustops:"Overview",agents:"Assessment team",reports:"Reports",demo:"Demo Studio", "ledger-sight":"LedgerSight POC"})[name] || name.replaceAll("-", " "))),
+    el("div", { class: "workspace-context-actions" }, state.cfg.mode !== "dev" ? el("span", { class: "workspace-session" }, "Secure session") : "", el("span", { class: "workspace-avatar", "aria-hidden": "true" }, tenantLabel(state.me.tenant).slice(0,1))));
   contextBar.scrollLeft = 0;
   // Pages that only CloudSeals staff (or specific staff roles) may use: show a clear message instead of an empty shell.
   const CASE_ROLES = ["cloudseals_admin", "cloudseals_assessor", "cloudseals_reviewer"], AUDIT = ["cloudseals_admin", "cloudseals_platform_ops", "auditor_readonly"];
   const ROUTE_ROLES = { cases: CASE_ROLES, case: CASE_ROLES, activity: AUDIT, "service-health": AUDIT, workspaces: [...CASE_ROLES, ...AUDIT], workspace: [...CASE_ROLES, ...AUDIT],
+    "ledger-sight": ["customer_admin", "customer_architect", "customer_risk", "customer_controller", "cloudseals_assessor", "cloudseals_admin"],
     queue: ["cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor"], registrations: ["cloudseals_admin"], users: ["cloudseals_admin"], admin: ["cloudseals_admin", "cloudseals_platform_ops", "cloudseals_reviewer", "cloudseals_assessor"] };
   if (ROUTE_ROLES[name] && !roles.some((r) => ROUTE_ROLES[name].includes(r))) {
     main.replaceChildren(moduleFrame("ACCESS", "You do not have access to this page", "This page is for CloudSeals staff. If you need it, ask a CloudSeals administrator to change your role.", el("p", {}, el("a", { class: "btn", href: "#/dashboard" }, "Back to overview"))));
@@ -201,7 +205,9 @@ async function render() {
   }
   const view = routes[name] || routes.assessments;
   main.replaceChildren(el("p", {}, "Loading…"));
-  try { await view(arg); } catch (e) { main.replaceChildren(el("div", { class: "card" }, el("h2", {}, "Something went wrong"), el("p", {}, e.message))); }
+  try {
+    await view(arg);
+  } catch (e) { main.replaceChildren(el("div", { class: "card" }, el("h2", {}, "Something went wrong"), el("p", {}, e.message))); }
   main.focus();
 }
 window.addEventListener("hashchange", render);
@@ -228,7 +234,7 @@ function assessmentGuide(canCreate = false) {
       el("div", {}, el("strong", {}, "We assess & review"), el("p", { class: "help" }, "Identify documented AI uses, check evidence and review potential gaps with a CloudSeals reviewer.")),
       el("div", {}, el("strong", {}, "You receive"), el("p", { class: "help" }, "Reviewed findings, maturity results and prioritised next actions. Final reports appear after approval."))),
     el("details", { class: "sample-drawer" }, el("summary", {}, "See sample documents"),
-      el("p", { class: "help" }, "SYNTHETIC DEMO: these examples explain the process. They are not customer results or a compliance certificate."),
+      el("p", { class: "help" }, "SAMPLE DATA: these examples explain the process. They are not customer results or a compliance certificate."),
       el("div", { class: "row" },
         el("button", { class: "secondary", type: "button", onclick: () => sampleDownload("SAMPLE-ai-register.txt", SAMPLE_AI_REGISTER) }, "Download sample AI register"),
         el("button", { class: "secondary", type: "button", onclick: () => sampleDownload("SAMPLE-ai-policy.txt", SAMPLE_AI_POLICY) }, "Download sample policy")),
@@ -254,7 +260,7 @@ routes.assessments = async () => {
   const startAction = canCreate
     ? el("a", { class: "btn", href: "#new-assessment", onclick: (e) => { e.preventDefault(); form.scrollIntoView({ behavior: "smooth", block: "center" }); $("#nm", form).focus({ preventScroll: true }); } }, "+ New assessment")
     : canStartCase ? el("a", { class: "btn", href: "#/cases" }, "+ Start customer case") : "";
-  const rows = items.map((a) => el("tr", {}, el("td", {}, el("a", { href: `#/assessment/${a.assessment_id}` }, a.ai_system_name)), el("td", {}, a.industry), el("td", {}, el("span", { class: `tag ${a.status === "In progress" ? "medium" : "ok"}` }, a.status)), el("td", {}, a.questionnaire_version)));
+  const rows = items.map((a) => el("tr", {}, el("td", {}, el("a", { href: `#/assessment/${a.assessment_id}` }, displayAISystemName(a.ai_system_name))), el("td", {}, a.industry), el("td", {}, el("span", { class: `tag ${a.status === "In progress" ? "medium" : "ok"}` }, a.status)), el("td", {}, a.questionnaire_version)));
   const form = el("form", { id: "assessment-create-form", class: "module-panel assessment-create-form", onsubmit: safe(async (e) => {
     e.preventDefault(); const f = new FormData(e.target);
     const a = await api("/v1/assessments", { method: "POST", idem: true, body: { ai_system_name: f.get("name"), industry: f.get("industry"), questionnaire_version: "1.0.0" } });
@@ -289,23 +295,26 @@ routes.assessment = async (aid) => {
     const sections = [...new Set(qs.map((q) => q.section))];
     if (!sections.includes(ctx.section)) ctx.section = sections[0];
     const p = ctx.a.progress, frozen = ctx.a.status !== "In progress";
-    const jump = (id) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    const nextStep = frozen ? "assessment-review" : ctx.evidence.length ? "assessment-questions" : "assessment-documents";
+    const recommendedStep = frozen ? "review" : ctx.a.progress.required_answered > 0 ? "questions" : ctx.evidence.length ? "questions" : "details";
+    if (!ctx.flowStep) ctx.flowStep = recommendedStep;
+    if (frozen) ctx.flowStep = "review";
+    const activeStep = ctx.flowStep;
+    const setStep = (step) => { ctx.flowStep = step; draw(); window.scrollTo({ top: 0, behavior: "smooth" }); };
     wrap.replaceChildren(
-      el("div", { class: "module-page-heading" }, el("span", { class: "eyebrow" }, "YOUR AI ASSESSMENT"), el("h2", {}, ctx.a.ai_system_name),
+      el("div", { class: "module-page-heading" }, el("span", { class: "eyebrow" }, "YOUR AI ASSESSMENT"), el("h2", {}, displayAISystemName(ctx.a.ai_system_name)),
         el("p", {}, "Share your documents, answer a few questions, then send your assessment for review."), el("span", { class: `tag ${frozen ? "ok" : "medium"}` }, ctx.a.status)),
       el("details", {class:"module-panel assessment-introduction"}, el("summary",{},"Assessment guide & sample documents"), assessmentGuide(!state.me.is_staff && state.me.roles.some((r) => ["customer_admin", "customer_architect"].includes(r)))),
-      state.cfg.assessment_model === "demo" ? el("p", { class: "assessment-model-notice", role: "status" }, "DEMO ENVIRONMENT: AI analysis here uses scripted examples. Real customer documents need a connected AI service and reviewer approval. Sample reports are illustrations only.")
+      state.cfg.assessment_model === "demo" ? el("p", { class: "assessment-model-notice", role: "status" }, "AI analysis is not connected in this workspace. Connect an approved AI service to generate findings from uploaded evidence; reports require reviewer approval.")
         : state.cfg.assessment_model === "unavailable" ? el("p", { class: "assessment-model-notice", role: "status" }, "Document AI analysis is not connected yet. You can upload documents and complete the questionnaire for review; automatic document findings and the diagnostic roadmap require the AI service. Application evidence and its reviewed report are available separately.") : "",
       el("nav", { class: "assessment-steps", "aria-label": "Assessment steps" },
-        [["assessment-details", "1", "Details", "Your AI system"], ["assessment-documents", "2", "Documents", "Share what you have"], ["assessment-questions", "3", "Questions", "Tell us about your AI"], ["assessment-review", "4", "Review & report", "Send for review"]].map(([id, number, title, hint]) =>
-          el("button", { class: `assessment-step ${nextStep === id ? "is-next" : ""}`, type: "button", onclick: () => jump(id) }, el("span", { class: "step-number" }, number), el("span", {}, el("strong", {}, title), el("small", {}, hint))))),
-      el("section", { id: "assessment-details", class: "card assessment-details" }, el("span", { class: "eyebrow" }, "STEP 1 · DETAILS"), el("h3", {}, "Your assessment at a glance"),
-        el("dl", { class: "assessment-detail-list" }, [["AI system", ctx.a.ai_system_name], ["Industry", ctx.a.industry], ["Status", ctx.a.status]].map(([label, value]) => el("div", {}, el("dt", {}, label), el("dd", {}, value || "Not specified")))),
-        el("button", { class: "secondary", type: "button", onclick: () => jump("assessment-documents") }, "Continue to documents")),
-      evidencePanel(ctx, draw),
-      await applicationEvidencePanel(ctx, draw),
-      el("section", { id: "assessment-questions", class: "assessment-question-step" },
+        [["details", "1", "Details", "AI system"], ["documents", "2", "Documents", "Share evidence"], ["questions", "3", "Questions", "Answer what you know"], ["review", "4", "Review & report", "Submit for review"]].map(([id, number, title, hint]) =>
+          el("button", { class: `assessment-step ${activeStep === id ? "is-next" : ""}`, "aria-current": activeStep === id ? "step" : null, type: "button", onclick: () => setStep(id) }, el("span", { class: "step-number" }, number), el("span", {}, el("strong", {}, title), el("small", {}, hint))))),
+      activeStep === "details" ? el("section", { id: "assessment-details", class: "card assessment-details" }, el("span", { class: "eyebrow" }, "STEP 1 · DETAILS"), el("h3", {}, "Your assessment at a glance"),
+        el("dl", { class: "assessment-detail-list" }, [["AI system", displayAISystemName(ctx.a.ai_system_name)], ["Industry", ctx.a.industry], ["Status", ctx.a.status]].map(([label, value]) => el("div", {}, el("dt", {}, label), el("dd", {}, value || "Not specified")))),
+        el("div", { class: "flow-step-actions" }, el("p", { class: "help" }, "Next, add any documents you already have. You can continue without documents."), el("button", { type: "button", onclick: () => setStep("documents") }, "Continue to documents →"))) : "",
+      activeStep === "documents" ? el("section", { class: "assessment-step-content" }, evidencePanel(ctx, draw), await applicationEvidencePanel(ctx, draw),
+        el("div", { class: "flow-step-actions" }, el("p", { class: "help" }, "No documents ready? You can still answer the questions."), el("button", { type: "button", onclick: () => setStep("questions") }, "Continue to questions →"))) : "",
+      activeStep === "questions" ? el("section", { id: "assessment-questions", class: "assessment-question-step" },
       el("div", { class: "module-panel assessment-progress" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "STEP 3 · QUESTIONS"), el("h3", {}, `${p.required_answered} of ${p.required_total} required answers`)), el("strong", {}, `${p.required_total ? Math.round(p.required_answered / p.required_total * 100) : 0}%`)), el("progress", { id: "pg", max: p.required_total || 1, value: p.required_answered }), el("p", { class: "help" }, "Answers save automatically when you finish a field. Choose ‘I don't know’ when you are unsure.")),
       el("details", { class: "setup-panel" }, el("summary", {}, el("strong", {}, "Scope & team"), el("span", { class: "help" }, ctx.scopeType === "org" ? " Whole organisation · optional settings" : ` ${ctx.scopeType}: ${ctx.scopeId}`)),
         scopeBar(ctx, draw),
@@ -316,10 +325,11 @@ routes.assessment = async (aid) => {
           return el("button", { "aria-current": sec === ctx.section, onclick: () => { ctx.section = sec; draw(); window.scrollTo({ top: 0 }); } },
             el("span", {}, sec), el("small", { class: done === inSec.length ? "done" : "" }, done === inSec.length ? "✓" : `${done}/${inSec.length}`));
         })),
-        el("div", { class: "questions" }, el("h3", { class: "section-title" }, ctx.section), qs.filter((q) => q.section === ctx.section).map((q, i) => questionCard(ctx, q, frozen, draw, i + 1))))),
-      el("section", { id: "assessment-review" },
+        el("div", { class: "questions" }, el("h3", { class: "section-title" }, ctx.section), qs.filter((q) => q.section === ctx.section).map((q, i) => questionCard(ctx, q, frozen, draw, i + 1)))),
+        el("div", { class: "flow-step-actions" }, el("button", { class: "secondary", type: "button", onclick: () => setStep("documents") }, "← Back to evidence"), el("button", { type: "button", onclick: () => setStep("review") }, "Continue to review →"))) : "",
+      activeStep === "review" ? el("section", { id: "assessment-review" },
       !frozen && !state.me.is_staff ? submitPanel(ctx, draw) : "",
-      await reportsPanel(ctx, draw)));
+      await reportsPanel(ctx, draw)) : "");
   };
   await draw();
 };
@@ -440,8 +450,7 @@ function evidencePanel(ctx, draw) {
       toast(r.state === "clean" ? "Uploaded and scanned: clean" : `Upload ${r.state}: ${r.reason}`, r.state !== "clean"); draw();
     }) }, "Upload")),
     el("p", { class: "help" }, "PDF, Word, Excel, TXT, CSV or JSON. Files are checked for safety before use."),
-    el("div", { class: "row" }, el("button", { class: "secondary", type: "button", onclick: () => document.getElementById("assessment-questions")?.scrollIntoView({ behavior: "smooth", block: "start" }) }, "Continue to questions"),
-      list.length ? el("a", { href: `#/use-cases/${ctx.aid}` }, "View AI use cases from documents →") : ""));
+    el("div", { class: "row" }, list.length ? el("a", { href: `#/use-cases/${ctx.aid}` }, "View AI use cases from documents →") : ""));
 }
 
 function submitPanel(ctx, draw) {
@@ -593,16 +602,27 @@ routes.dashboard = async () => {
   const [{items:assessments},{items:reports}] = await Promise.all([api("/v1/assessments"),api("/v1/report-library")]);
   const inProgress=assessments.filter(a=>a.status==="In progress"), publishedIds=new Set(reports.map(r=>r.assessment_id));
   const awaiting=assessments.filter(a=>a.status!=="In progress"&&!publishedIds.has(a.assessment_id));
-  const journey=(n,title,text,href,label)=>el("a",{class:"journey-card",href},el("span",{class:"journey-number"},n),el("h3",{},title),el("p",{},text),el("span",{class:"journey-action"},label," →"));
+  const activeAssessment=inProgress[0]?.assessment_id;
+  const workflowStages = [
+    ["01", "Define the AI system", "Name the system, purpose, owner and industry.", "YOUR TEAM"],
+    ["02", "Share evidence", "Add documents and answer what your team knows.", "YOUR TEAM"],
+    ["03", "Check evidence", "Organize submitted evidence and flag what is still unknown.", "TRUSTOPS"],
+    ["04", "Human review", "A reviewer validates candidate findings and follows up on gaps.", "REVIEWER"],
+    ["05", "Get the report", "Read reviewed findings, evidence limits and recommended actions.", "YOUR TEAM"],
+  ];
   main.replaceChildren(el("div",{class:"module-page overview-page"},
     workspaceHeading("YOUR AI ASSESSMENTS","AI oversight. A clear next step.","Understand your AI system, share evidence and receive a reviewed report.",el("a",{class:"btn",href:"#/assessments"},"Start an assessment +")),
     workspaceStats([["Assessments",assessments.length,"AI systems in this workspace"],["In progress",inProgress.length,"Evidence and questions"],["Awaiting review",awaiting.length,"Submitted without a published report"],["Published reports",reports.length,"Reviewed and ready to download"]]),
-    el("section",{class:"workspace-journey"},
-      journey("01","Describe your AI","Create an assessment and tell us what the system does.","#/assessments","Open assessments"),
-      journey("02","Share evidence","Upload available documents or application observations and answer the relevant questions.","#/agent-flow","Follow the assessment process"),
-      journey("03","Review the report","Receive findings and improvement actions after reviewer validation.","#/reports","View published reports")),
+    el("section",{class:"workflow-infographic","aria-labelledby":"workflow-infographic-title"},
+      el("div",{class:"workflow-infographic-heading"},el("div",{},el("span",{class:"eyebrow"},"FROM AI SYSTEM TO ACTION"),el("h2",{id:"workflow-infographic-title"},"How a TrustOps assessment works")),
+        el("span",{class:"workflow-proof-label"},"Evidence first · Human reviewed")),
+      el("div",{class:"workflow-infographic-track"},workflowStages.map(([number,title,description,owner],index)=>
+        el("article",{class:`workflow-infographic-stage${index===3?" reviewer-stage":""}`},
+          el("div",{class:"workflow-stage-top"},el("span",{class:"workflow-stage-number"},number),index<workflowStages.length-1?el("span",{class:"workflow-stage-arrow","aria-hidden":"true"},"→"):""),
+          el("span",{class:"workflow-stage-owner"},owner),el("h3",{},title),el("p",{},description)))),
+      el("p",{class:"workflow-infographic-note"},"A missing document is recorded as missing evidence; it is not treated as proof that a control is absent.")),
     el("section",{class:"module-panel"},el("div",{class:"module-panel-heading"},el("h3",{},"Your assessments"),el("a",{class:"text-link",href:"#/assessments"},"View all →")),
-      assessments.length ? el("div",{class:"table-wrap"},el("table",{class:"module-table"},el("thead",{},el("tr",{},["AI system","Industry","Status", ""].map(label=>el("th",{},label)))),el("tbody",{},assessments.slice(0,5).map(a=>el("tr",{},el("td",{},a.ai_system_name),el("td",{},a.industry),el("td",{},a.status),el("td",{},el("a",{href:`#/assessment/${a.assessment_id}`},"Open assessment →")))))))
+      assessments.length ? el("div",{class:"table-wrap"},el("table",{class:"module-table"},el("thead",{},el("tr",{},["AI system","Industry","Status", ""].map(label=>el("th",{},label)))),el("tbody",{},assessments.slice(0,5).map(a=>el("tr",{},el("td",{},displayAISystemName(a.ai_system_name)),el("td",{},a.industry),el("td",{},a.status),el("td",{},el("a",{href:`#/assessment/${a.assessment_id}`},"Open assessment →")))))))
         : el("p",{class:"empty-state"},"Create your first assessment to get started.")),
     overviewExamples()));
 };
@@ -616,7 +636,7 @@ routes.reports = async () => {
     const filtered=published.filter(r=>`${r.ai_system_name} ${r.kind}`.toLowerCase().includes(term));
     content.replaceChildren(el("div",{class:"report-library"},filtered.length ? filtered.map(r=>el("article",{class:"report-library-card"},
       el("div",{class:"report-cover","aria-hidden":"true"},el("span",{},"CLOUDSEALS"),el("strong",{},"AI assessment"),el("span",{},"REPORT"),el("div",{class:"report-cover-lines"})),
-      el("div",{class:"report-library-copy"},el("span",{class:"tag ok"},"Published"),el("h3",{},r.ai_system_name),el("p",{},`${r.industry} · Version ${r.version} · ${r.kind === "application_evidence" ? "Application evidence" : r.kind === "document_diagnostic" ? "Document diagnostic" : "Questionnaire assessment"}`),el("p",{class:"help"},r.kind === "application_evidence" ? "Reviewed application observations, scope limits and evidence requests." : r.kind === "document_diagnostic" ? "Reviewed AI inventory, framework gaps, maturity and improvement roadmap." : "Findings, supporting answers and prioritised improvement actions, released after review."),
+      el("div",{class:"report-library-copy"},el("span",{class:"tag ok"},"Published"),el("h3",{},displayAISystemName(r.ai_system_name)),el("p",{},`${r.industry} · Version ${r.version} · ${r.kind === "application_evidence" ? "Application evidence" : r.kind === "document_diagnostic" ? "Document diagnostic" : "Questionnaire assessment"}`),el("p",{class:"help"},r.kind === "application_evidence" ? "Reviewed application observations, scope limits and evidence requests." : r.kind === "document_diagnostic" ? "Reviewed AI inventory, framework gaps, maturity and improvement roadmap." : "Findings, supporting answers and prioritised improvement actions, released after review."),
         el("div",{class:"row"},Object.entries(r.download_urls).map(([format,url],index)=>el("button",{class:index ? "secondary" : "",onclick:safe(()=>dl(url,`TrustOps-${r.kind}-v${r.version}.${format}`))},`Download ${format === "docx" ? "Word" : format.toUpperCase()} ↓`))),
         el("a",{class:"text-link",href:`#/${r.kind === "document_diagnostic" ? "use-cases" : "assessment"}/${r.assessment_id}`},"View assessment & findings →")))) : el("div",{class:"module-panel empty-state"},"No published reports match your search. Reports appear here after review and publication.")),
       el("section",{class:"workspace-note"},el("p",{},"Looking for a report still in progress? Open its assessment to check the review status."),el("a",{href:"#/assessments"},"View assessments →")));
@@ -625,6 +645,140 @@ routes.reports = async () => {
   main.replaceChildren(el("div",{class:"module-page results-page"},workspaceHeading("REVIEWED OUTCOMES","Reports","Published assessment reports, application observations and improvement roadmaps."),
     workspaceStats([["Published reports",published.length,"Ready to download"],["Assessments",assessments.length,"AI systems in this workspace"],["Without a published report",assessments.filter(a=>!publishedIds.has(a.assessment_id)).length,"Continue the assessment or reviewer process"]]),
     el("div",{class:"results-toolbar"},query),content));
+};
+
+// ---------- LedgerSight Core POC walkthrough ----------
+// A small, honest walkthrough of the documented AR/Cash workflow. The API
+// remains authoritative for policy, approval, token and connector decisions.
+const ledgerActionTokens = new Map();
+routes["ledger-sight"] = async (selectedRunId) => {
+  const [overview, { items: recentRuns }] = await Promise.all([api("/v1/agentops"), api("/v1/runs?limit=10")]);
+  const roles = state.me.roles;
+  const canStart = ["customer_admin", "customer_architect", "customer_risk", "customer_controller", "cloudseals_assessor", "cloudseals_admin"].some(r => roles.includes(r));
+  const canApprove = roles.includes("customer_controller");
+  const canExecute = canStart;
+  const workflowId = overview.workflow_pack;
+  const subtitle = "Match incoming receipts to invoices, apply the policy gate, and keep a reviewable record of each decision.";
+  const safety = el("section", { class: "ledger-demo-safety", role: "note" },
+    el("strong", {}, "SAMPLE DATA · CONTROLLED WORKFLOW"),
+    el("p", {}, "Uses fictional receipts and the mock_sap connector. No bank account, real payment, or customer ERP is accessed or changed."));
+  const stages = el("section", { class: "ledger-demo-stages", "aria-label": "How the workflow works" },
+    [["1", "Check the input", "Receipt, amount, currency and reference are validated."],
+      ["2", "Match the invoice", "Candidates are compared; unclear matches go to review."],
+      ["3", "Apply policy", "High-value actions require a different controller to approve."],
+      ["4", "Record evidence", "Prepare/execute steps are recorded and can be verified."]]
+      .map(([n, title, text]) => el("article", {}, el("span", {}, n), el("strong", {}, title), el("p", {}, text))));
+  const scenarioList = [
+    ["exact", "Exact match", "One exact invoice match; policy may allow a proposal.", "Run exact-match scenario"],
+    ["ambiguous", "Ambiguous match", "Two exact candidates; the workflow should escalate for review.", "Run ambiguous scenario"],
+    ["high", "High-value match", "An exact match above the example limit; a separate controller must approve.", "Run high-value scenario"],
+    ["unmatched", "No match", "No invoice matches the receipt; no proposal should be prepared.", "Run no-match scenario"]
+  ];
+  const scenarioCards = el("div", { class: "ledger-demo-scenarios" }, scenarioList.map(([key, title, text, label]) => {
+    const button = el("button", { type: "button", disabled: !canStart || overview.mode !== "sandbox", onclick: safe(async () => {
+      button.disabled = true;
+      try {
+        const receiptId = `SAMPLE-${key.toUpperCase()}-${crypto.randomUUID().slice(0, 8)}`;
+        const reference = `REF-${receiptId.slice(-8)}`;
+        const amount = key === "high" ? 150000 : 25000;
+        const exact = { invoice_id: `INV-${receiptId.slice(-8)}-A`, amount_minor: amount, currency: "USD", reference };
+        const invoices = key === "ambiguous" ? [exact, { ...exact, invoice_id: `INV-${receiptId.slice(-8)}-B` }]
+          : key === "unmatched" ? [{ ...exact, amount_minor: amount + 100, reference: `OTHER-${reference}` }] : [exact];
+        const run = await api(`/v1/workflows/${encodeURIComponent(workflowId)}/runs`, { method: "POST", idem: true,
+          body: { receipt: { receipt_id: receiptId, amount_minor: amount, currency: "USD", reference }, invoices, remittance: { reference } } });
+        toast(`Workflow finished: ${run.status.replaceAll("_", " ")}`);
+        go(`#/ledger-sight/${run.run_id}`);
+      } finally { button.disabled = false; }
+    }) }, label);
+    return el("article", { class: "ledger-demo-scenario" }, el("h3", {}, title), el("p", {}, text), button);
+  }));
+  const detail = el("section", { class: "ledger-demo-detail", id: "ledger-run-detail", "aria-live": "polite" });
+  const drawRun = async (runId) => {
+    if (!runId) { detail.replaceChildren(); return; }
+    const run = await api(`/v1/runs/${encodeURIComponent(runId)}`);
+    const decision = run.policy_decision || {};
+    const statusText = (run.status || "unknown").replaceAll("_", " ");
+    const decisionText = decision.decision === "ALLOW" ? "Policy allows preparation" : decision.decision === "ESCALATE" ? "Needs human review" : decision.decision || "Not available";
+    const trace = el("ol", { class: "ledger-agent-trace" }, (run.agent_trace || []).map((step, index) => {
+      const label = step.agent_id.split(".").at(-1).replaceAll("_", " ").replace(/\b\w/g, x => x.toUpperCase());
+      const rec = step.recommendation || {};
+      const note = rec.rationale || rec.explanation || rec.summary || step.reason_code?.replaceAll("_", " ") || "Completed with recorded input evidence.";
+      return el("li", {}, el("span", {}, String(index + 1).padStart(2, "0")), el("div", {}, el("strong", {}, label), el("p", {}, note)), el("small", {}, (step.status || "completed").replaceAll("_", " ")));
+    }));
+    const actions = [];
+    if (run.status === "approval_required" && canApprove) {
+      const reason = el("input", { maxlength: 2000, placeholder: "Why are you approving or rejecting?", "aria-label": "Controller decision reason" });
+      const decide = (decisionValue) => safe(async () => {
+        if (!reason.value.trim()) return toast("Enter a decision reason first.", true);
+        await api(`/v1/approvals/${run.run_id}/decision`, { method: "POST", idem: true, body: { decision: decisionValue, reason: reason.value.trim() } });
+        toast(`Controller decision recorded: ${decisionValue}`); await drawRun(run.run_id);
+      });
+      actions.push(el("section", { class: "module-panel" }, el("h3", {}, "Controller approval required"),
+        el("p", {}, "Only a different user with the customer_controller role can decide this request."), reason,
+        el("div", { class: "row" }, el("button", { type: "button", onclick: decide("approve") }, "Approve proposal"),
+          el("button", { class: "secondary", type: "button", onclick: decide("reject") }, "Reject proposal"))));
+    } else if (run.status === "approval_required") {
+      actions.push(el("p", { class: "ledger-demo-note" }, "Waiting for a separate customer controller. Open this run after signing in with the authorized controller account."));
+    }
+    if (canExecute && ["ready_to_prepare", "approved_to_prepare", "prepared"].includes(run.status)) {
+      const prepare = el("button", { type: "button", onclick: safe(async () => {
+        const prepared = await api("/v1/execution/prepare", { method: "POST", idem: true, body: { run_id: run.run_id } });
+        if (prepared.action_token) ledgerActionTokens.set(run.run_id, prepared.action_token);
+        toast("Pre-commit evidence recorded; one-use action token issued."); await drawRun(run.run_id);
+      }) }, run.status === "prepared" ? "Issue a new one-use token" : "Prepare with evidence");
+      const execute = run.status === "prepared" ? el("button", { type: "button", onclick: safe(async () => {
+        const token = ledgerActionTokens.get(run.run_id);
+        if (!token) return toast("The one-use token is not in this session. Issue a new token first.", true);
+        await api("/v1/execution/execute", { method: "POST", idem: true, body: { run_id: run.run_id, action_token: token } });
+        ledgerActionTokens.delete(run.run_id); toast("Controlled action completed through mock_sap."); await drawRun(run.run_id);
+      }) }, "Run controlled action") : "";
+      actions.push(el("section", { class: "module-panel" }, el("h3", {}, "Governed execution"),
+        el("p", {}, "The API enforces the policy decision, approval and evidence pre-commit before this mock action."), el("div", { class: "row" }, prepare, execute)));
+    }
+    const verified = run.evidence_verified;
+    const verifyButton = el("button", { type: "button", class: "secondary", onclick: safe(async () => {
+      const result = await api(`/v1/evidence/${run.run_id}/verify`, { method: "POST" });
+      toast(result.valid ? `Evidence verified (${result.integrity}).` : "Evidence verification failed.", !result.valid);
+      await drawRun(run.run_id);
+    }) }, verified ? "Verify evidence again" : "Verify run evidence");
+    detail.replaceChildren(el("div", { class: "ledger-demo-detail-heading" },
+      el("div", {}, el("span", { class: "eyebrow" }, "WORKFLOW RESULT"), el("h3", {}, `Receipt ${run.receipt_id}`),
+        el("p", {}, `${run.currency} ${(run.amount_minor / 100).toFixed(2)} · ${statusText}`)),
+      el("a", { class: "text-link", href: "#/ledger-sight" }, "Start another scenario →")),
+      el("div", { class: "ledger-demo-result-cards" },
+        el("article", {}, el("span", {}, "Policy"), el("strong", {}, decisionText), el("small", {}, (decision.reason_code || "").replaceAll("_", " "))),
+        el("article", {}, el("span", {}, "Connector"), el("strong", {}, "mock_sap"), el("small", {}, "Synthetic only; no external write")),
+        el("article", {}, el("span", {}, "Approval"), el("strong", {}, run.approval?.decision || (decision.approval_required ? "Required" : "Not required")), el("small", {}, run.approval?.by || ""))),
+      run.proposal ? el("section", { class: "module-panel" }, el("h3", {}, "Proposed allocation"),
+        el("p", {}, `${run.proposal.currency} ${(run.proposal.amount_minor / 100).toFixed(2)} → invoice ${run.proposal.invoice_id} · reference ${run.proposal.reference}`))
+        : el("p", { class: "ledger-demo-note" }, "No allocation proposal was authorized for this result."),
+      el("section", { class: "module-panel" }, el("h3", {}, "Six-step agent trace"), el("p", { class: "help" }, `${overview.agent_mode === "deterministic" ? "Deterministic mode: no model is configured; do not describe this run as model-generated." : `Configured analysis mode: ${overview.agent_mode}.`} Each step is constrained by the deterministic policy gate.`), trace),
+      el("section", { class: "module-panel" }, el("h3", {}, "Run evidence"), el("p", {}, `Run ID: ${run.run_id}`),
+        el("p", {}, `Input fingerprint: ${run.input_digest || "not available"}`), verifyButton), ...actions);
+  };
+  const historyRows = recentRuns.map(run => el("tr", {},
+    el("td", {}, run.receipt_id),
+    el("td", {}, `${run.currency} ${(run.amount_minor / 100).toFixed(2)}`),
+    el("td", {}, (run.status || "").replaceAll("_", " ")),
+    el("td", {}, run.policy_decision?.decision || "—"),
+    el("td", {}, el("a", { href: `#/ledger-sight/${run.run_id}` }, "Open →"))));
+  const history = recentRuns.length ? el("section", { class: "module-panel" }, el("h3", {}, "Recent runs"),
+    el("div", { class: "table-wrap" }, el("table", { class: "module-table" },
+      el("thead", {}, el("tr", {}, ["Receipt", "Amount", "Status", "Decision", ""].map(h => el("th", {}, h)))),
+      el("tbody", {}, historyRows))))
+    : el("p", { class: "empty-state" }, "No workflow runs yet. Choose a scenario to see the real API workflow.");
+  main.replaceChildren(moduleFrame("TRUSTOPS CORE · LEDGERSIGHT", "LedgerSight AR/Cash", subtitle,
+    safety,
+    el("section", { class: "ledger-demo-status" }, el("strong", {}, overview.mode === "sandbox" ? "Controlled runtime ready" : "Runtime unavailable in this environment"),
+      el("span", {}, `${overview.agents.length} bounded roles · ${overview.agent_mode === "deterministic" ? "deterministic checks" : overview.agent_mode} · ${overview.connector_status}`)),
+    el("section", { class: "module-panel" }, el("h3", {}, "How this workflow works"),
+      el("p", {}, "A receipt is compared with invoice candidates. TrustOps records the agent trace, applies a deterministic policy, routes ambiguity or high value for review, and only then allows a controlled proposal."), stages),
+    el("section", { class: "module-panel" }, el("div", { class: "module-panel-heading" }, el("div", {}, el("span", { class: "eyebrow" }, "RUN A CONTROLLED EXAMPLE"), el("h3", {}, "Choose a scenario")),
+      el("span", { class: "tag" }, "4 synthetic cases")),
+      canStart ? scenarioCards : el("p", { class: "empty-state" }, "Your current role cannot start this workflow."),
+      overview.mode !== "sandbox" ? el("p", { class: "module-note" }, "The governed runtime is enabled only in the local development environment.") : ""),
+    history, detail));
+  if (selectedRunId) await drawRun(selectedRunId);
 };
 
 const assessmentRoster = registry => registry.catalog.filter(agent => agent.group === "assessment" ||
@@ -817,7 +971,7 @@ routes["agent-flow"] = async (aidArg) => {
   const aid=assessments.some(a=>a.assessment_id===aidArg)?aidArg:assessments[0].assessment_id;
   const [detail,evidence,inventory,{items:reports}]=await Promise.all([api(`/v1/assessments/${aid}`),api(`/v1/assessments/${aid}/evidence`),api(`/v1/assessments/${aid}/inventory`),api("/v1/report-library")]);
   const clean=evidence.items.filter(e=>e.state==="clean"), published=reports.filter(r=>r.assessment_id===aid);
-  const picker=el("label",{class:"process-picker"},"Assessment",el("select",{onchange:e=>go(`#/agent-flow/${e.target.value}`)},assessments.map(a=>el("option",{value:a.assessment_id,selected:a.assessment_id===aid},a.ai_system_name))));
+  const picker=el("label",{class:"process-picker"},"Assessment",el("select",{onchange:e=>go(`#/agent-flow/${e.target.value}`)},assessments.map(a=>el("option",{value:a.assessment_id,selected:a.assessment_id===aid},displayAISystemName(a.ai_system_name)))));
   const stage=(number,title,status,text,href,label)=>el("article",{class:"module-panel assessment-process-stage"},
     el("div",{class:"module-panel-heading"},el("div",{},el("span",{class:"eyebrow"},`STEP ${number}`),el("h3",{},title)),el("span",{class:"tag"},status)),
     el("p",{},text),el("a",{class:"btn secondary",href},label));
@@ -1031,7 +1185,7 @@ routes["use-cases"] = async (aidArg) => {
   const docs = evidence.items.filter((e) => e.state === "clean" && docTypes.includes(e.content_type));
   const redraw = () => routes["use-cases"](aid);
   const picker = el("label", { class: "uc-picker" }, "Assessment", el("select", { onchange: (e) => go(`#/use-cases/${e.target.value}`) },
-    assessments.map((a) => el("option", { value: a.assessment_id, selected: a.assessment_id === aid }, `${a.ai_system_name} (${a.status})`))));
+    assessments.map((a) => el("option", { value: a.assessment_id, selected: a.assessment_id === aid }, `${displayAISystemName(a.ai_system_name)} (${a.status})`))));
   const runBtn = el("button", { disabled: !docs.length, title: docs.length ? "" : "Upload a clean PDF, Word or text document first", onclick: safe(async (e) => {
     const button = e.currentTarget, label = button.textContent;
     button.disabled = true; button.setAttribute("aria-busy", "true"); button.textContent = "Reading documents…";
@@ -1251,9 +1405,9 @@ routes.case = async (cid) => {
     } else if (tab === "assessments") {
       const all = (await api("/v1/assessments")).items.filter((a) => !c.assessment_ids.includes(a.assessment_id) && (!c.tenant_id || a.tenant_id === c.tenant_id));
       const evidence = await Promise.all(c.assessments.map(async (a) => ({ a, ev: (await api(`/v1/assessments/${a.assessment_id}/evidence`)).items })));
-      const pick = el("select", { "aria-label": "Assessment to link" }, all.map((a) => el("option", { value: a.assessment_id }, `${a.ai_system_name} (${a.status})`)));
+      const pick = el("select", { "aria-label": "Assessment to link" }, all.map((a) => el("option", { value: a.assessment_id }, `${displayAISystemName(a.ai_system_name)} (${a.status})`)));
       body = el("div", {}, el("section", { class: "module-panel" }, el("span", { class: "eyebrow" }, "LINKED ASSESSMENTS"), el("h3", {}, `${c.assessments.length} assessment${c.assessments.length === 1 ? "" : "s"}`),
-        evidence.length ? evidence.map(({ a, ev }) => el("article", { class: "uc-card" }, el("div", { class: "uc-head" }, el("h4", {}, a.ai_system_name), el("span", { class: "tag" }, a.status),
+        evidence.length ? evidence.map(({ a, ev }) => el("article", { class: "uc-card" }, el("div", { class: "uc-head" }, el("h4", {}, displayAISystemName(a.ai_system_name)), el("span", { class: "tag" }, a.status),
           el("a", { href: `#/use-cases/${a.assessment_id}` }, "Diagnostic studio →"), el("a", { href: `#/assessment/${a.assessment_id}` }, "Assessment →"),
           isLead ? el("button", { class: "secondary", onclick: safe(async () => { await api(`/v1/cases/${cid}/assessments/${a.assessment_id}`, { method: "DELETE" }); toast("Unlinked"); draw(); }) }, "Unlink") : ""),
           el("p", { class: "help" }, "Documents"), ev.length ? el("ul", { class: "fw-controls" }, ev.map((e) => el("li", {}, `${e.filename} `, el("span", { class: `tag ${e.state === "clean" ? "ok" : "high"}` }, e.state)))) : el("p", { class: "help" }, "No documents uploaded yet.")))

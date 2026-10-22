@@ -73,7 +73,7 @@ def as_user(browser, base_url, tokens):
     def open_page(sub, route="", width=1440, height=900, scheme="light"):
         ctx = browser.new_context(viewport={"width": width, "height": height}, color_scheme=scheme, accept_downloads=True)
         if sub:
-            ctx.add_init_script(f"sessionStorage.setItem('taad_token','{tokens[sub]}')")
+            ctx.add_init_script(f"sessionStorage.setItem('taad_token','{tokens[sub]}');")
         contexts.append(ctx)
         page = ctx.new_page()
         page.errors = []

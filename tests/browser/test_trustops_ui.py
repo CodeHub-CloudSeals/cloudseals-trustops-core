@@ -17,8 +17,10 @@ def test_retired_navigation_opens_assessment_overview(as_user, route):
 def test_customer_overview_is_assessment_focused(as_user, assessment, width):
     page = as_user("admin@t-bank", "dashboard", width=width, height=900)
     expect(page.get_by_role("heading", name="AI oversight. A clear next step.")).to_be_visible()
-    for name in ("Overview", "Assessments", "Assessment process", "Reports"):
+    for name in ("Overview", "Assessments", "Reports", "LedgerSight POC"):
         expect(page.locator("#nav").get_by_role("link", name=name, exact=True)).to_be_visible()
+    expect(page.locator("#nav").get_by_role("link", name="Assessment process", exact=True)).to_have_count(0)
+    expect(page.locator("#nav").get_by_role("link", name="Assessment team", exact=True)).to_have_count(0)
     expect(page.locator("main")).not_to_contain_text("Payment")
     expect(page.locator("main")).not_to_contain_text("LedgerSight")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")

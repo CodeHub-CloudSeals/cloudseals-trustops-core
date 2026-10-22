@@ -24,12 +24,12 @@ def prepare(base: str, output: Path) -> dict:
     if parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost") or parsed.username or parsed.password:
         raise SystemExit("Demo preparation only accepts an HTTP localhost service.")
 
-    def request(method, path, body=None, who=None, raw=None, extra=None, allow=()):
+    def request(method, path, body=None, who=None, raw=None, extra=None, allow=(), idem=None):
         headers = dict(extra or {})
         if who:
             headers["Authorization"] = "Bearer " + tokens[who]
         if method in ("POST", "PUT"):
-            headers["Idempotency-Key"] = str(uuid.uuid4())
+            headers["Idempotency-Key"] = idem or str(uuid.uuid4())
         data = raw
         if body is not None:
             data = json.dumps(body).encode()
@@ -85,6 +85,7 @@ def prepare(base: str, output: Path) -> dict:
         if scenario == "APPROVAL" and run and run["status"] != "approval_required":
             # A previous presentation may have approved it. Create a new sample,
             # preserving the old decision and its evidence rather than resetting it.
+            receipt_id = f"DEMO-APPROVAL-{uuid.uuid4().hex[:8].upper()}"
             run = None
         if run is None:
             invoice = {"invoice_id": "DEMO-INV-" + scenario, "amount_minor": amount, "currency": "USD", "reference": receipt_id}
@@ -100,6 +101,21 @@ def prepare(base: str, output: Path) -> dict:
         evidence = request("POST", f"/v1/evidence/{run['run_id']}/verify", who=customer)
         assert evidence["valid"], evidence
         prepared_runs[scenario.lower()] = {"run_id": run["run_id"], "evidence_valid": evidence["valid"], "integrity": evidence["integrity"]}
+    # Re-send the exact same request with the same key. The API must return the
+    # original run instead of creating a second one or repeating a side effect.
+    duplicate_id = f"DEMO-IDEMPOTENCY-{uuid.uuid4().hex[:8].upper()}"
+    duplicate_receipt = {"receipt": {"receipt_id": duplicate_id, "amount_minor": 25000,
+                         "currency": "USD", "reference": duplicate_id},
+                         "invoices": [{"invoice_id": f"{duplicate_id}-INV", "amount_minor": 25000,
+                                       "currency": "USD", "reference": duplicate_id}],
+                         "remittance": {"reference": duplicate_id}}
+    duplicate_key = f"demo-idempotency-replay-{uuid.uuid4()}"
+    first = request("POST", "/v1/workflows/ledgersight.ar_cash/runs", duplicate_receipt, customer,
+                    idem=duplicate_key)
+    replay = request("POST", "/v1/workflows/ledgersight.ar_cash/runs", duplicate_receipt, customer,
+                     idem=duplicate_key)
+    assert first["run_id"] == replay["run_id"], "Idempotent replay created a second workflow run"
+    prepared_runs["idempotent_replay"] = {"run_id": first["run_id"], "same_run_returned": True}
     # Negative checks demonstrate existing role and tenant boundaries; they do not alter approvals.
     approval_id = prepared_runs["approval"]["run_id"]
     denied = request("POST", f"/v1/approvals/{approval_id}/decision", {"decision": "approve", "reason": "Synthetic negative permission check"}, customer, allow=(403,))

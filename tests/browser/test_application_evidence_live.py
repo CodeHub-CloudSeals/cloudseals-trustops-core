@@ -40,6 +40,7 @@ def test_actual_capture_upload_review_publish_and_customer_download(tmp_path):
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.goto(base + '/portal/#/assessment/' + aid)
             expect(page.get_by_role('heading', name=name, exact=True)).to_be_visible()
+            page.locator('.assessment-step').nth(1).click()
             return page
 
         try:

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +24,7 @@ def http_capture():
 @pytest.mark.parametrize('width', [1440, 390])
 def test_url_inspection_attaches_clean_evidence_and_leaves_report_for_review(as_user, assessment, width):
     page = as_user('admin@t-bank', f'assessment/{assessment}', width=width)
+    page.get_by_role('button', name=re.compile('Documents')).click()
     calls = []
 
     def inspected(route):
@@ -60,6 +62,7 @@ def test_url_inspection_attaches_clean_evidence_and_leaves_report_for_review(as_
 
 def test_failed_url_inspection_shows_error_and_does_not_attach_a_capture(as_user, assessment):
     page = as_user('admin@t-bank', f'assessment/{assessment}')
+    page.get_by_role('button', name=re.compile('Documents')).click()
     page.route('**/website-inspection', lambda route: route.fulfill(status=422, content_type='application/json',
                body=json.dumps({'code': 'website_inspection_failed', 'message': 'Use a public website. Local addresses are blocked.'})))
     form = page.locator('.website-inspection-form')
@@ -74,6 +77,7 @@ def test_failed_url_inspection_shows_error_and_does_not_attach_a_capture(as_user
 
 def test_assessment_offers_actual_reports_without_a_static_sample_link(as_user, assessment):
     page = as_user('admin@t-bank', f'assessment/{assessment}')
+    page.get_by_role('button', name=re.compile('Review & report')).click()
     expect(page.get_by_role('heading', name='Your reports', exact=True)).to_be_visible()
     expect(page.locator('a[href="sample-assessment-report.html"]')).to_have_count(0)
     expect(page.get_by_text('No published assessment report yet. Complete the assessment and send it for review.')).to_be_visible()
